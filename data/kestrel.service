@@ -1,0 +1,79 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# Install to /usr/lib/systemd/system/kestrel.service.
+# Companion files: kestrel.tmpfiles.conf, com.hihusky.Kestrel.conf,
+# com.hihusky.Kestrel.service, com.hihusky.kestrel.policy.
+
+[Unit]
+Description=Kestrel wireless orchestrator
+Documentation=file:/usr/share/doc/kestrel/README.md
+Requires=dbus.socket
+After=dbus.socket
+# Kestrel drives these daemons over D-Bus; it copes with them starting
+# later, but prefers to find them up.
+Wants=systemd-networkd.service
+After=systemd-networkd.service wpa_supplicant.service iwd.service
+# Kestrel expects exclusive control of wireless interfaces on its backend.
+Conflicts=NetworkManager.service connman.service
+
+[Service]
+Type=notify
+NotifyAccess=main
+BusName=com.hihusky.Kestrel
+ExecStart=/usr/libexec/kestrel-daemon
+Restart=on-failure
+RestartSec=2s
+# kestrel-daemon releases every binding and sweeps on SIGTERM.
+TimeoutStopSec=30s
+
+# Runs as root, but with no capabilities at all. Root identity is needed to
+# own the bus name, to talk to wpa_supplicant/iwd under their stock D-Bus
+# policies, to write /run/systemd/network (owned by root), and to use the
+# host credential key. No privileged operation remains: Kestrel never
+# touches netlink, sysctls, or devices other than the TPM.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+UMask=0077
+
+# Saved profiles and encrypted secrets.
+StateDirectory=kestrel
+StateDirectoryMode=0700
+# Runtime networkd units. Created at boot by kestrel.tmpfiles.conf; the
+# leading "-" lets the unit start (and report the problem) if it is missing.
+ProtectSystem=strict
+ReadWritePaths=-/run/systemd/network
+ProtectHome=yes
+PrivateTmp=yes
+ProtectProc=invisible
+
+# No devices except the TPM, which systemd-creds uses to seal secrets.
+# (PrivateDevices=yes would hide the TPM.)
+DevicePolicy=closed
+DeviceAllow=/dev/tpmrm0 rw
+
+# D-Bus is the only channel. PrivateNetwork= is not used: it would hide the
+# host's links in /sys/class/net, which Kestrel reads for hardware addresses.
+RestrictAddressFamilies=AF_UNIX
+IPAddressDeny=any
+
+ProtectKernelTunables=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+RemoveIPC=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources
+SystemCallErrorNumber=EPERM
+
+[Install]
+WantedBy=multi-user.target
+Alias=dbus-com.hihusky.Kestrel.service

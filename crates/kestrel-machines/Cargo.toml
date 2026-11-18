@@ -1,0 +1,17 @@
+[package]
+name = "kestrel-machines"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Pure sans-IO state machines for Kestrel"
+
+[dependencies]
+kestrel-model.workspace = true
+
+[dev-dependencies]
+proptest.workspace = true
+
+[lints]
+workspace = true

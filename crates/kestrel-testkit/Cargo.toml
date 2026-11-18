@@ -1,0 +1,18 @@
+[package]
+name = "kestrel-testkit"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "In-memory fake providers for testing Kestrel without hardware"
+publish = false
+
+[dependencies]
+async-trait.workspace = true
+kestrel-model.workspace = true
+kestrel-ports.workspace = true
+tokio.workspace = true
+
+[lints]
+workspace = true

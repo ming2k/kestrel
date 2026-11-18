@@ -1,0 +1,1 @@
+doc-valid-idents = ["DHCPv4", "DHCPv6", "IPv4", "IPv6", "WPA2", "WPA3", "SoftAP", "iwd", "systemd-networkd", "..", "D-Bus"]

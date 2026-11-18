@@ -1,0 +1,22 @@
+[package]
+name = "kestrel-catalog"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Persisted profile, secret, certificate, P2P group, and history catalog for Kestrel"
+
+[dependencies]
+kestrel-model.workspace = true
+kestrel-ports.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+tracing.workspace = true
+
+[dev-dependencies]
+kestrel-testkit.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }
+
+[lints]
+workspace = true

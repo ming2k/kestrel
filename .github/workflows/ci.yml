@@ -1,0 +1,75 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -Dwarnings
+  RUSTDOCFLAGS: -Dwarnings
+
+jobs:
+  lint:
+    name: Format, Clippy, Features & Docs
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Check optional feature matrices
+        run: |
+          cargo check -p kestrel-api --no-default-features
+          cargo check -p kestrel-api --no-default-features --features client
+          cargo check -p kestrel-wlan-wpa --no-default-features
+          cargo check -p kestrel-wlan-iwd --no-default-features
+      - name: Run Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Build documentation
+        run: cargo doc --workspace --no-deps
+      - name: Build release binaries
+        run: cargo build --release -p kestrel-daemon -p kestrel-cli
+
+  msrv:
+    name: MSRV (1.89)
+    runs-on: ubuntu-latest
+    env:
+      RUSTUP_TOOLCHAIN: "1.89"
+      RUSTFLAGS: ""
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.89
+      - uses: Swatinem/rust-cache@v2
+      - name: Check workspace on MSRV
+        run: cargo check --workspace --all-features
+
+  test:
+    name: Unit, Adapter, System & E2E Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install system dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            dbus \
+            iproute2 \
+            libxml2-utils \
+            systemd \
+            uidmap
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run workspace tests
+        run: cargo test --workspace --all-features -- --skip e2e
+      - name: Validate system packaging files
+        run: ./scripts/check-system-files.sh
+      - name: Run end-to-end suite against systemd-networkd
+        run: |
+          sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0 || true
+          ./crates/kestrel-e2e/run.sh

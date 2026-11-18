@@ -1,0 +1,50 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# /etc/kestrel/kestrel.toml: administrator settings. Every key is optional;
+# the values shown are the defaults. Unknown keys are rejected.
+#
+# Saved networks are NOT configured here: they are profiles managed through
+# the D-Bus API (`kestrel profile add …`) and stored under
+# /var/lib/kestrel, with secrets encrypted by systemd-creds.
+
+[wireless]
+backend = "auto"            # auto | wpa-supplicant | iwd
+enabled = true
+
+[l3]
+backend = "networkd"        # networkd | none (L2 only)
+unit_dir = "/run/systemd/network"
+
+[storage]
+profiles = "/var/lib/kestrel/profiles"
+secrets = "/var/lib/kestrel/secrets"
+certs = "/var/lib/kestrel/certs"
+p2p_groups = "/var/lib/kestrel/p2p-groups"
+history = "/var/lib/kestrel/history.jsonl"
+state = "/var/lib/kestrel/state.toml"
+secret_backend = "systemd-creds"   # systemd-creds | systemd-creds-user
+
+[api]
+authorization = "polkit"    # polkit | bus-policy
+
+[p2p]
+device_name = "Kestrel"
+go_intent = 7
+# Candidate /24 subnets for addresses Kestrel serves: P2P group owners and
+# hotspots both allocate from this pool.
+subnet_pool = [
+  "192.168.49.0/24",
+  "10.49.0.0/24", "10.49.1.0/24", "10.49.2.0/24", "10.49.3.0/24",
+  "10.49.4.0/24", "10.49.5.0/24", "10.49.6.0/24", "10.49.7.0/24",
+  "10.49.8.0/24", "10.49.9.0/24", "10.49.10.0/24", "10.49.11.0/24",
+  "10.49.12.0/24", "10.49.13.0/24", "10.49.14.0/24", "10.49.15.0/24",
+]
+
+[timeouts]                  # seconds
+scan = 15
+association = 30
+l3 = 30
+link_grace = 10
+negotiation = 120
+group_formation = 30
+agent = 120                 # at most 120: agent calls share the daemon's D-Bus timeout

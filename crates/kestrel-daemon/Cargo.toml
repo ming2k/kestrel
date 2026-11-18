@@ -1,0 +1,39 @@
+[package]
+name = "kestrel-daemon"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "kestrel-daemon: the Kestrel orchestrator daemon (composition root)"
+
+[[bin]]
+name = "kestrel-daemon"
+path = "src/main.rs"
+
+[dependencies]
+async-trait.workspace = true
+clap.workspace = true
+futures-util.workspace = true
+kestrel-api = { workspace = true, features = ["server"] }
+kestrel-catalog.workspace = true
+kestrel-controller.workspace = true
+kestrel-l3-networkd.workspace = true
+kestrel-model.workspace = true
+kestrel-ports.workspace = true
+kestrel-store.workspace = true
+kestrel-wlan-iwd.workspace = true
+kestrel-wlan-wpa.workspace = true
+serde.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+toml.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+zbus.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

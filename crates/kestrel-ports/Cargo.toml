@@ -1,0 +1,17 @@
+[package]
+name = "kestrel-ports"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Southbound ports (backend traits) for Kestrel"
+
+[dependencies]
+async-trait.workspace = true
+kestrel-model.workspace = true
+thiserror.workspace = true
+tokio = { workspace = true, features = ["sync"] }
+
+[lints]
+workspace = true

@@ -1,0 +1,28 @@
+[package]
+name = "kestrel-wlan-wpa"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "wpa_supplicant wireless and Wi-Fi Direct provider for Kestrel"
+
+[features]
+# A fake fi.w1.wpa_supplicant1 service for adapter and end-to-end tests.
+testkit = []
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+kestrel-model.workspace = true
+kestrel-ports.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zbus.workspace = true
+
+[dev-dependencies]
+kestrel-wlan-wpa = { path = ".", features = ["testkit"] }
+tempfile.workspace = true
+
+[lints]
+workspace = true

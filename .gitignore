@@ -1,0 +1,20 @@
+# Build artifacts
+/target/
+
+# Hardware validation output and temporary secrets
+/hw-artifacts-*/
+/hwsim-artifacts-*/
+*.cred
+*.cred.tmp
+*.cred.invalid
+
+# Rust & Cargo backup files
+**/*.rs.bk
+
+# Editor & OS files
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store

@@ -1,0 +1,24 @@
+[package]
+name = "kestrel-l3-networkd"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "systemd-networkd L3 provider for Kestrel"
+
+[dependencies]
+async-trait.workspace = true
+futures-util.workspace = true
+kestrel-model.workspace = true
+kestrel-ports.workspace = true
+serde_json.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+zbus.workspace = true
+
+[dev-dependencies]
+tempfile.workspace = true
+
+[lints]
+workspace = true

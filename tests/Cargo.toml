@@ -1,0 +1,41 @@
+[package]
+name = "kestrel-tests"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Workspace-level integration and end-to-end tests for Kestrel"
+publish = false
+
+[lib]
+path = "common/mod.rs"
+
+[dependencies]
+async-trait.workspace = true
+kestrel-api = { workspace = true, features = ["server"] }
+kestrel-catalog.workspace = true
+kestrel-controller.workspace = true
+kestrel-model.workspace = true
+kestrel-ports.workspace = true
+kestrel-store.workspace = true
+kestrel-testkit.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+zbus.workspace = true
+
+[dev-dependencies]
+kestrel-e2e.workspace = true
+
+[[test]]
+name = "integration"
+path = "integration/main.rs"
+
+[[test]]
+name = "e2e"
+path = "e2e/main.rs"
+
+[lints]
+workspace = true

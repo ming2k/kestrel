@@ -1,0 +1,10 @@
+# SPDX-License-Identifier: LGPL-2.1-or-later
+#
+# D-Bus system service activation. Install to
+# /usr/share/dbus-1/system-services/com.hihusky.Kestrel.service.
+# A client calling com.hihusky.Kestrel starts kestrel.service on demand.
+[D-BUS Service]
+Name=com.hihusky.Kestrel
+Exec=/bin/false
+User=root
+SystemdService=dbus-com.hihusky.Kestrel.service

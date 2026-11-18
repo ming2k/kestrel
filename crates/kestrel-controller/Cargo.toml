@@ -1,0 +1,25 @@
+[package]
+name = "kestrel-controller"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "Live radio controller and domain drivers for Kestrel's sans-IO state machines"
+
+[dependencies]
+kestrel-catalog.workspace = true
+kestrel-machines.workspace = true
+kestrel-model.workspace = true
+kestrel-ports.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+
+[dev-dependencies]
+async-trait.workspace = true
+kestrel-testkit.workspace = true
+tokio = { workspace = true, features = ["test-util"] }
+
+[lints]
+workspace = true

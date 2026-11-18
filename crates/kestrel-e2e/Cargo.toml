@@ -1,0 +1,27 @@
+[package]
+name = "kestrel-e2e"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+description = "End-to-end tests: real kestrel-daemon/kestrel, real systemd-networkd, fake wpa_supplicant"
+publish = false
+
+[[bin]]
+name = "kestrel-fake-wpa"
+path = "src/bin/kestrel-fake-wpa.rs"
+
+[dependencies]
+kestrel-api.workspace = true
+kestrel-wlan-wpa = { workspace = true, features = ["testkit"] }
+serde_json.workspace = true
+tempfile.workspace = true
+tokio.workspace = true
+zbus.workspace = true
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+serde.workspace = true
