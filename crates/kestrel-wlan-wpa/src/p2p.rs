@@ -59,25 +59,28 @@ impl WpaSupplicant {
     }
 
     pub(crate) async fn read_peer(&self, path: &OwnedObjectPath) -> Option<P2pPeer> {
-        let proxy = self.proxy(path.as_str(), PEER).await.ok()?;
-        let address = proxy
-            .get_property::<Vec<u8>>("DeviceAddress")
+        let props_proxy = self
+            .proxy(path.as_str(), "org.freedesktop.DBus.Properties")
             .await
-            .ok()
+            .ok()?;
+        let reply = props_proxy.call_method("GetAll", &(PEER,)).await.ok()?;
+        let props: HashMap<String, zbus::OwnedVariant> = reply.body().deserialize().ok()?;
+        let address = props
+            .get("DeviceAddress")
+            .and_then(|v| Vec::<u8>::try_from(v.clone()).ok())
             .and_then(|bytes| mac_from_bytes(&bytes))
             .or_else(|| peer_address(path))?;
-        let name = proxy
-            .get_property::<String>("DeviceName")
-            .await
+        let name = props
+            .get("DeviceName")
+            .and_then(|v| String::try_from(v.clone()).ok())
             .unwrap_or_default();
-        let device_type = proxy
-            .get_property::<Vec<u8>>("PrimaryDeviceType")
-            .await
-            .ok()
+        let device_type = props
+            .get("PrimaryDeviceType")
+            .and_then(|v| Vec::<u8>::try_from(v.clone()).ok())
             .and_then(|bytes| format_device_type(&bytes));
-        let raw_ies = proxy
-            .get_property::<Vec<u8>>("IEs")
-            .await
+        let raw_ies = props
+            .get("IEs")
+            .and_then(|v| Vec::<u8>::try_from(v.clone()).ok())
             .unwrap_or_default();
         let wfd_subelements = extract_wfd_subelements(&raw_ies);
         Some(P2pPeer {

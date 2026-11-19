@@ -1,6 +1,13 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
 //! The single, ordered consumer of `wpa_supplicant` signals.
+//!
+//! Signal reception is strictly decoupled from async D-Bus RPC dispatch:
+//! a non-blocking drain task pulls messages off `zbus::MessageStream`s and
+//! enqueues them into an unbounded channel, while a dedicated worker task
+//! processes them in arrival order. This prevents `zbus`'s socket reader
+//! from ever deadlocking when a signal burst arrives during RPC work such
+//! as reading scan results.
 
 use std::collections::HashMap;
 use std::sync::Weak;
@@ -11,11 +18,13 @@ use kestrel_ports::PortResult;
 use kestrel_ports::ap::ApEvent;
 use kestrel_ports::p2p::{P2pEvent, RequestedMethod};
 use kestrel_ports::wlan::WlanEvent;
+use tokio::sync::mpsc;
+use tokio::task::AbortHandle;
 use zbus::message::Type;
 use zbus::{OwnedObjectPath, OwnedVariant as OwnedValue};
 
 use crate::{
-    INTERFACE, Iface, Inner, MAIN, P2P_DEVICE, Role, SERVICE, WpaSupplicant, dbus_error,
+    INTERFACE, Iface, Inner, MAIN, MAIN_PATH, P2P_DEVICE, Role, SERVICE, WpaSupplicant, dbus_error,
     mac_from_bytes,
 };
 
@@ -25,31 +34,88 @@ const PERSISTENT_GROUP: &str = "fi.w1.wpa_supplicant1.PersistentGroup";
 
 type Dict = HashMap<String, OwnedValue>;
 
-pub(crate) async fn start(inner: Weak<Inner>, connection: zbus::Connection) -> PortResult<()> {
-    let signals = zbus::MatchRule::builder()
-        .msg_type(Type::Signal)
-        .sender(SERVICE)
-        .build()
-        .map_err(dbus_error)?;
-    let owner = zbus::MatchRule::builder()
-        .msg_type(Type::Signal)
-        .sender("org.freedesktop.DBus")
-        .interface("org.freedesktop.DBus")
-        .member("NameOwnerChanged")
-        .arg(0, SERVICE)
-        .build()
-        .map_err(dbus_error)?;
-    let signals = zbus::MessageStream::for_match_rule(signals, &connection, None)
-        .await
-        .map_err(dbus_error)?;
-    let owner = zbus::MessageStream::for_match_rule(owner, &connection, None)
-        .await
-        .map_err(dbus_error)?;
-    // Both streams are merged so their relative order is preserved as
-    // delivered by the bus.
-    let mut merged = futures_util::stream::select(signals, owner);
-    tokio::spawn(async move {
+pub(crate) async fn start(
+    inner: Weak<Inner>,
+    connection: zbus::Connection,
+) -> PortResult<Vec<AbortHandle>> {
+    // Explicit, interface-scoped match rules:
+    // - excludes noisy `fi.w1.wpa_supplicant1.BSS` beacon/signal churn at the
+    //   bus daemon;
+    // - avoids unfiltered well-known sender rules, which `zbus` treats as
+    //   client-side wildcards across all streams on the shared connection.
+    let rules = [
+        zbus::MatchRule::builder()
+            .msg_type(Type::Signal)
+            .sender("org.freedesktop.DBus")
+            .interface("org.freedesktop.DBus")
+            .member("NameOwnerChanged")
+            .arg(0, SERVICE)
+            .build()
+            .map_err(dbus_error)?,
+        zbus::MatchRule::builder()
+            .msg_type(Type::Signal)
+            .sender(SERVICE)
+            .interface(MAIN)
+            .path(MAIN_PATH)
+            .build()
+            .map_err(dbus_error)?,
+        zbus::MatchRule::builder()
+            .msg_type(Type::Signal)
+            .sender(SERVICE)
+            .interface(INTERFACE)
+            .path_namespace(MAIN_PATH)
+            .build()
+            .map_err(dbus_error)?,
+        zbus::MatchRule::builder()
+            .msg_type(Type::Signal)
+            .sender(SERVICE)
+            .interface(P2P_DEVICE)
+            .path_namespace(MAIN_PATH)
+            .build()
+            .map_err(dbus_error)?,
+        zbus::MatchRule::builder()
+            .msg_type(Type::Signal)
+            .sender(SERVICE)
+            .interface(WPS)
+            .path_namespace(MAIN_PATH)
+            .build()
+            .map_err(dbus_error)?,
+        zbus::MatchRule::builder()
+            .msg_type(Type::Signal)
+            .sender(SERVICE)
+            .interface(PROPERTIES)
+            .member("PropertiesChanged")
+            .path_namespace(MAIN_PATH)
+            .build()
+            .map_err(dbus_error)?,
+    ];
+
+    let mut streams = Vec::with_capacity(rules.len());
+    for rule in rules {
+        streams.push(
+            zbus::MessageStream::for_match_rule(rule, &connection, None)
+                .await
+                .map_err(dbus_error)?,
+        );
+    }
+    let mut merged = futures_util::stream::select_all(streams);
+
+    let (tx, mut rx) = mpsc::unbounded_channel();
+    let drain_weak = inner.clone();
+    let drain = tokio::spawn(async move {
         while let Some(message) = merged.next().await {
+            if drain_weak.strong_count() == 0 {
+                return;
+            }
+            if tx.send(message).is_err() {
+                return;
+            }
+        }
+        tracing::warn!("wpa_supplicant signal stream ended");
+    });
+
+    let worker = tokio::spawn(async move {
+        while let Some(message) = rx.recv().await {
             let Some(inner) = inner.upgrade() else {
                 return;
             };
@@ -59,9 +125,9 @@ pub(crate) async fn start(inner: Weak<Inner>, connection: zbus::Connection) -> P
                 Err(error) => tracing::warn!(%error, "malformed wpa_supplicant signal"),
             }
         }
-        tracing::warn!("wpa_supplicant signal stream ended");
     });
-    Ok(())
+
+    Ok(vec![drain.abort_handle(), worker.abort_handle()])
 }
 
 #[allow(clippy::too_many_lines)]
@@ -74,23 +140,35 @@ async fn dispatch(wpa: &WpaSupplicant, message: &zbus::Message) {
     };
     let path = OwnedObjectPath::from(path.to_owned());
     let body = message.body();
-    match (interface.as_str(), member.as_str()) {
-        ("org.freedesktop.DBus", "NameOwnerChanged") => {
-            if let Ok((name, old_owner, new_owner)) = body.deserialize::<(String, String, String)>()
-                && name == SERVICE
-            {
-                if !old_owner.is_empty() {
-                    tracing::warn!("wpa_supplicant left the bus");
-                    wpa.backend_vanished();
-                }
-                if !new_owner.is_empty() {
-                    tracing::info!("wpa_supplicant appeared on the bus");
-                    if let Err(error) = wpa.discover().await {
-                        tracing::warn!(%error, "cannot discover wpa_supplicant interfaces");
-                    }
+
+    if interface.as_str() == "org.freedesktop.DBus" && member.as_str() == "NameOwnerChanged" {
+        if let Ok((name, old_owner, new_owner)) = body.deserialize::<(String, String, String)>()
+            && name == SERVICE
+        {
+            if !old_owner.is_empty() {
+                tracing::warn!("wpa_supplicant left the bus");
+                wpa.backend_vanished();
+            }
+            if !new_owner.is_empty() {
+                tracing::info!("wpa_supplicant appeared on the bus");
+                wpa.lock().wpa_owner = Some(new_owner);
+                if let Err(error) = wpa.discover().await {
+                    tracing::warn!(%error, "cannot discover wpa_supplicant interfaces");
                 }
             }
         }
+        return;
+    }
+
+    // Reject signals that did not originate from the current `wpa_supplicant`
+    // bus owner (protects against client-side well-known sender wildcards).
+    if let Some(expected_owner) = wpa.lock().wpa_owner.clone()
+        && header.sender().map(zbus::names::UniqueName::as_str) != Some(expected_owner.as_str())
+    {
+        return;
+    }
+
+    match (interface.as_str(), member.as_str()) {
         (MAIN, "InterfaceAdded") => {
             if let Ok((added, _)) = body.deserialize::<(OwnedObjectPath, Dict)>() {
                 wpa.interface_added(added).await;
@@ -101,6 +179,16 @@ async fn dispatch(wpa: &WpaSupplicant, message: &zbus::Message) {
                 wpa.interface_removed(&removed);
             }
         }
+        // Native `wpa_supplicant` D-Bus v1 signal: `Interface.PropertiesChanged(a{sv})`.
+        (INTERFACE, "PropertiesChanged") => {
+            if let Ok(changed) = body.deserialize::<Dict>()
+                && (changed.contains_key("State") || changed.contains_key("CurrentBSS"))
+            {
+                wpa.refresh_link(&path).await;
+            }
+        }
+        // Standard D-Bus `org.freedesktop.DBus.Properties.PropertiesChanged(s, a{sv}, as)`
+        // fallback for compatibility if emitted on an interface object.
         (PROPERTIES, "PropertiesChanged") => {
             if let Ok((changed_interface, changed, _)) =
                 body.deserialize::<(String, Dict, Vec<String>)>()
@@ -230,6 +318,37 @@ fn role_from(value: Option<&str>) -> P2pRole {
     }
 }
 
+/// Real `wpa_supplicant` sends `role_go` in `GONegotiationSuccess` as an
+/// `i32` (`1` = Group Owner, `0` = client). Accept integers, booleans, and
+/// `"GO"` strings for robustness.
+fn role_from_go_flag(dict: &Dict, key: &str) -> P2pRole {
+    let Some(value) = dict.get(key) else {
+        return P2pRole::Client;
+    };
+    if let Ok(n) = i32::try_from(value.clone()) {
+        return if n != 0 {
+            P2pRole::GroupOwner
+        } else {
+            P2pRole::Client
+        };
+    }
+    if let Ok(n) = u32::try_from(value.clone()) {
+        return if n != 0 {
+            P2pRole::GroupOwner
+        } else {
+            P2pRole::Client
+        };
+    }
+    if let Ok(b) = bool::try_from(value.clone()) {
+        return if b {
+            P2pRole::GroupOwner
+        } else {
+            P2pRole::Client
+        };
+    }
+    role_from(String::try_from(value.clone()).ok().as_deref())
+}
+
 #[allow(clippy::too_many_lines)]
 async fn p2p_signal(
     wpa: &WpaSupplicant,
@@ -297,7 +416,7 @@ async fn p2p_signal(
         }
         "GONegotiationSuccess" => {
             if let Ok(info) = body.deserialize::<Dict>() {
-                let role = role_from(dict_str(&info, "role_go").as_deref());
+                let role = role_from_go_flag(&info, "role_go");
                 events.publish(&P2pEvent::GoNegotiationSucceeded { device, role });
             }
         }

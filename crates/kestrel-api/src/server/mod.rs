@@ -164,7 +164,11 @@ impl Server {
     pub async fn stop(self) {
         self.sync.abort();
         self.owner_watch.abort();
-        let _ = self.connection.release_name(BUS_NAME).await;
+        let _ = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.connection.release_name(BUS_NAME),
+        )
+        .await;
     }
 }
 

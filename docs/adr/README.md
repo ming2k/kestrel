@@ -12,3 +12,4 @@ Each record captures one architectural decision, its context, and its consequenc
 | [0006](0006-enterprise-8021x-and-certificate-store.md) | 802.1X / WPA-Enterprise and sealed certificate storage | Accepted |
 | [0007](0007-persistent-p2p-groups-and-capability-contract.md) | Persistent Wi-Fi Direct groups and device security capability contract | Accepted |
 | [0008](0008-domain-bounded-crates-catalog-controller-machines.md) | Domain-bounded crates: catalog, controller, and sans-IO machines | Accepted |
+| [0009](0009-non-blocking-dbus-signal-monitors-and-wire-faithful-adapters.md) | Non-blocking D-Bus signal monitors and wire-faithful adapters | Accepted |

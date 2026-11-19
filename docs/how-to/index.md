@@ -1,16 +1,29 @@
 # How-To Guides
 
-Task-oriented guides for users and system administrators. Each guide assumes you have completed [Getting Started](../tutorials/getting-started.md) and have `kestrel-daemon` running.
+Task-oriented procedures for end users, system administrators, and desktop/script integrators.
 
 ---
 
-## Guides
+## Installation & System Integration
 
-| Guide | Solves |
+| Guide | What it covers |
 | :--- | :--- |
-| [Manage Network Profiles](manage-profiles.md) | Create, edit, prioritize, configure static L3/DNS, import certificates for 802.1X, and delete saved Wi-Fi profiles. |
-| [Use Wi-Fi Direct (P2P) and Miracast](p2p-and-miracast.md) | Discover P2P peers, negotiate or start autonomous groups, save persistent groups for WPS-free reconnects, and inspect session IP addresses. |
-| [Run a Hotspot (SoftAP)](hotspot.md) | Share the wireless radio as an access point, inspect leases and clients, and return to station mode. |
-| [Deploy Kestrel with systemd](deploy-systemd.md) | Install `kestrel-daemon`, D-Bus/polkit policies, `systemd-creds`, and `.network.d` drop-ins. |
+| [Install, Switch Backends, and Uninstall](install-and-migrate.md) | Prerequisites, `make install` layout, `systemd-tmpfiles` and `systemd-creds`, configuring `wpa_supplicant` or `iwd`, migrating from NetworkManager/ConnMan, `.network.d/` drop-ins, and uninstalling cleanly. |
 
-For the complete command list, see [CLI & Daemon Reference](../reference/commands.md).
+## Wireless Workflows
+
+| Guide | What it covers |
+| :--- | :--- |
+| [Wi-Fi and Network Profiles](wifi-and-profiles.md) | Daily station control, scanning, joining, autoconnect and priorities, hidden SSIDs, BSSID pinning, static IPv4/IPv6/DNS, `unmanaged` L3, and secret rotation. |
+| [802.1X Enterprise Wi-Fi and Certificates](enterprise-8021x.md) | Importing public PEM certificates, configuring PEAP/TTLS/EAP-TLS/PWD profiles, sealing private keys with `systemd-creds`, and verifying RADIUS server identities. |
+| [Run a Hotspot (SoftAP)](hotspot.md) | Turning an AP-capable adapter into a hotspot, configuring uplink forwarding, monitoring DHCP leases and clients, and restoring station mode. |
+| [Wi-Fi Direct (P2P) and Miracast](p2p-and-miracast.md) | Discovering peers, WPS/GO negotiation, autonomous GO groups, persistent groups without WPS, and Miracast / Wi-Fi Display subelements. |
+
+## Automation & Operations
+
+| Guide | What it covers |
+| :--- | :--- |
+| [Scripting, Agents, and Polkit](scripting-and-agents.md) | Machine-readable `--json` output, NDJSON `monitor` streaming, non-interactive secret input, running `kestrel agent`, and customizing polkit authorization rules. |
+| [Troubleshooting](troubleshooting.md) | Diagnostic checklist, enabling debug logs, and resolving common startup, permission, L2/L3, credential, hotspot, and rfkill issues. |
+
+For exhaustive syntax, defaults, and error tables, see the [Reference](../reference/index.md).

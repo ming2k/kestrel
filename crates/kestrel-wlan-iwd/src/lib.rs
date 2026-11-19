@@ -103,6 +103,19 @@ pub(crate) struct Inner {
     pub(crate) state: Mutex<State>,
     events: EventBus<WlanEvent>,
     ap_events: EventBus<ApEvent>,
+    monitor_tasks: Mutex<Vec<tokio::task::AbortHandle>>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        let tasks = self
+            .monitor_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for task in tasks.iter() {
+            task.abort();
+        }
+    }
 }
 
 /// The iwd provider.
@@ -130,6 +143,7 @@ impl Iwd {
             state: Mutex::new(State::default()),
             events: EventBus::new(),
             ap_events: EventBus::new(),
+            monitor_tasks: Mutex::new(Vec::new()),
         });
         let this = Self { inner };
         agent::serve(&this.inner.connection, Arc::downgrade(&this.inner)).await?;
@@ -471,30 +485,56 @@ impl Iwd {
 
     async fn start_monitor(&self) -> PortResult<()> {
         let connection = self.inner.connection.clone();
-        let signals = zbus::MatchRule::builder()
-            .msg_type(Type::Signal)
-            .sender(SERVICE)
-            .build()
-            .map_err(dbus_error)?;
-        let owner = zbus::MatchRule::builder()
-            .msg_type(Type::Signal)
-            .sender("org.freedesktop.DBus")
-            .interface("org.freedesktop.DBus")
-            .member("NameOwnerChanged")
-            .arg(0, SERVICE)
-            .build()
-            .map_err(dbus_error)?;
-        let signals = zbus::MessageStream::for_match_rule(signals, &connection, None)
-            .await
-            .map_err(dbus_error)?;
-        let owner = zbus::MessageStream::for_match_rule(owner, &connection, None)
-            .await
-            .map_err(dbus_error)?;
-        let mut merged = futures_util::stream::select(signals, owner);
-        let weak = Arc::downgrade(&self.inner);
-        tokio::spawn(async move {
+        let rules = [
+            zbus::MatchRule::builder()
+                .msg_type(Type::Signal)
+                .sender("org.freedesktop.DBus")
+                .interface("org.freedesktop.DBus")
+                .member("NameOwnerChanged")
+                .arg(0, SERVICE)
+                .build()
+                .map_err(dbus_error)?,
+            zbus::MatchRule::builder()
+                .msg_type(Type::Signal)
+                .sender(SERVICE)
+                .interface(OBJECT_MANAGER)
+                .path("/")
+                .build()
+                .map_err(dbus_error)?,
+            zbus::MatchRule::builder()
+                .msg_type(Type::Signal)
+                .sender(SERVICE)
+                .interface(PROPERTIES)
+                .member("PropertiesChanged")
+                .path_namespace(MANAGER_PATH)
+                .build()
+                .map_err(dbus_error)?,
+        ];
+        let mut streams = Vec::with_capacity(rules.len());
+        for rule in rules {
+            streams.push(
+                zbus::MessageStream::for_match_rule(rule, &connection, None)
+                    .await
+                    .map_err(dbus_error)?,
+            );
+        }
+        let mut merged = futures_util::stream::select_all(streams);
+        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let drain_weak = Arc::downgrade(&self.inner);
+        let drain = tokio::spawn(async move {
             while let Some(message) = merged.next().await {
-                let Some(inner) = weak.upgrade() else {
+                if drain_weak.strong_count() == 0 {
+                    return;
+                }
+                if tx.send(message).is_err() {
+                    return;
+                }
+            }
+        });
+        let worker_weak = Arc::downgrade(&self.inner);
+        let worker = tokio::spawn(async move {
+            while let Some(message) = rx.recv().await {
+                let Some(inner) = worker_weak.upgrade() else {
                     return;
                 };
                 if let Ok(message) = message {
@@ -503,6 +543,11 @@ impl Iwd {
                 }
             }
         });
+        self.inner
+            .monitor_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend([drain.abort_handle(), worker.abort_handle()]);
         Ok(())
     }
 
@@ -515,26 +560,31 @@ impl Iwd {
         };
         let path = OwnedObjectPath::from(path.to_owned());
         let body = message.body();
-        match (interface.as_str(), member.as_str()) {
-            ("org.freedesktop.DBus", "NameOwnerChanged") => {
-                // Filter by name here too: match-rule argument filtering is
-                // not guaranteed to be applied to every delivered message.
-                if let Ok((name, old_owner, new_owner)) =
-                    body.deserialize::<(String, String, String)>()
-                    && name == SERVICE
-                {
-                    if !old_owner.is_empty() {
-                        tracing::warn!("iwd left the bus");
-                        self.vanished();
-                    }
-                    if !new_owner.is_empty() {
-                        self.lock().iwd_owner = Some(new_owner);
-                        if let Err(error) = self.attach().await {
-                            tracing::warn!(%error, "cannot attach to iwd");
-                        }
+        if interface.as_str() == "org.freedesktop.DBus" && member.as_str() == "NameOwnerChanged" {
+            // Filter by name here too: match-rule argument filtering is
+            // not guaranteed to be applied to every delivered message.
+            if let Ok((name, old_owner, new_owner)) = body.deserialize::<(String, String, String)>()
+                && name == SERVICE
+            {
+                if !old_owner.is_empty() {
+                    tracing::warn!("iwd left the bus");
+                    self.vanished();
+                }
+                if !new_owner.is_empty() {
+                    self.lock().iwd_owner = Some(new_owner);
+                    if let Err(error) = self.attach().await {
+                        tracing::warn!(%error, "cannot attach to iwd");
                     }
                 }
             }
+            return;
+        }
+        if let Some(expected_owner) = self.lock().iwd_owner.clone()
+            && header.sender().map(zbus::names::UniqueName::as_str) != Some(expected_owner.as_str())
+        {
+            return;
+        }
+        match (interface.as_str(), member.as_str()) {
             (OBJECT_MANAGER, "InterfacesAdded") => {
                 if let Ok((added, interfaces)) =
                     body.deserialize::<(OwnedObjectPath, HashMap<String, Props>)>()

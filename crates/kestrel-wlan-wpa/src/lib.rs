@@ -110,6 +110,7 @@ pub(crate) struct State {
     pub(crate) suppress_persistent_added: usize,
     pub(crate) p2p_capable: bool,
     pub(crate) ap_capable: bool,
+    pub(crate) wpa_owner: Option<String>,
 }
 
 type P2pPeerState = kestrel_model::P2pPeer;
@@ -176,6 +177,19 @@ pub(crate) struct Inner {
     pub(crate) events: EventBus<WlanEvent>,
     pub(crate) p2p_events: EventBus<P2pEvent>,
     pub(crate) ap_events: EventBus<ApEvent>,
+    pub(crate) monitor_tasks: Mutex<Vec<tokio::task::AbortHandle>>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        let tasks = self
+            .monitor_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for task in tasks.iter() {
+            task.abort();
+        }
+    }
 }
 
 /// The `wpa_supplicant` provider.
@@ -211,9 +225,16 @@ impl WpaSupplicant {
             events: EventBus::new(),
             p2p_events: EventBus::new(),
             ap_events: EventBus::new(),
+            monitor_tasks: Mutex::new(Vec::new()),
         });
         let this = Self { inner };
-        monitor::start(Arc::downgrade(&this.inner), this.inner.connection.clone()).await?;
+        let tasks =
+            monitor::start(Arc::downgrade(&this.inner), this.inner.connection.clone()).await?;
+        this.inner
+            .monitor_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend(tasks);
         if let Err(error) = this.discover().await {
             tracing::warn!(%error, "wpa_supplicant is not available yet");
         }
@@ -245,6 +266,12 @@ impl WpaSupplicant {
 
     /// Reads the daemon's interfaces and capabilities from scratch.
     pub(crate) async fn discover(&self) -> PortResult<()> {
+        if let Ok(dbus) = zbus::fdo::DBusProxy::new(&self.inner.connection).await
+            && let Ok(name) = zbus::names::BusName::try_from(SERVICE)
+            && let Ok(owner) = dbus.get_name_owner(name).await
+        {
+            self.lock().wpa_owner = Some(owner.as_str().to_owned());
+        }
         let main = self.proxy(MAIN_PATH, MAIN).await?;
         let capabilities: Vec<String> = main.get_property("Capabilities").await.unwrap_or_default();
         let mut paths: Vec<OwnedObjectPath> =
@@ -456,6 +483,7 @@ impl WpaSupplicant {
         state.known_groups.clear();
         state.self_persistent_groups.clear();
         state.suppress_persistent_added = 0;
+        state.wpa_owner = None;
     }
 
     pub(crate) fn device_for(
@@ -587,14 +615,40 @@ impl WpaSupplicant {
         if path.as_str() == "/" {
             return None;
         }
-        let bss = self.proxy(path.as_str(), BSS).await.ok()?;
-        let ssid = Ssid::from_bytes(bss.get_property::<Vec<u8>>("SSID").await.ok()?).ok()?;
-        let bssid = mac_from_bytes(&bss.get_property::<Vec<u8>>("BSSID").await.ok()?)?;
-        let frequency = bss.get_property::<u16>("Frequency").await.unwrap_or(0);
-        let signal = bss.get_property::<i16>("Signal").await.unwrap_or(i16::MIN);
-        let privacy = bss.get_property::<bool>("Privacy").await.unwrap_or(false);
-        let wpa: HashMap<String, OwnedValue> = bss.get_property("WPA").await.unwrap_or_default();
-        let rsn: HashMap<String, OwnedValue> = bss.get_property("RSN").await.unwrap_or_default();
+        let props_proxy = self
+            .proxy(path.as_str(), "org.freedesktop.DBus.Properties")
+            .await
+            .ok()?;
+        let reply = props_proxy.call_method("GetAll", &(BSS,)).await.ok()?;
+        let props: HashMap<String, OwnedValue> = reply.body().deserialize().ok()?;
+        let ssid_bytes = props
+            .get("SSID")
+            .and_then(|v| Vec::<u8>::try_from(v.clone()).ok())?;
+        let ssid = Ssid::from_bytes(ssid_bytes).ok()?;
+        let bssid_bytes = props
+            .get("BSSID")
+            .and_then(|v| Vec::<u8>::try_from(v.clone()).ok())?;
+        let bssid = mac_from_bytes(&bssid_bytes)?;
+        let frequency = props
+            .get("Frequency")
+            .and_then(|v| u16::try_from(v.clone()).ok())
+            .unwrap_or(0);
+        let signal = props
+            .get("Signal")
+            .and_then(|v| i16::try_from(v.clone()).ok())
+            .unwrap_or(i16::MIN);
+        let privacy = props
+            .get("Privacy")
+            .and_then(|v| bool::try_from(v.clone()).ok())
+            .unwrap_or(false);
+        let wpa: HashMap<String, OwnedValue> = props
+            .get("WPA")
+            .and_then(|v| HashMap::<String, OwnedValue>::try_from(v.clone()).ok())
+            .unwrap_or_default();
+        let rsn: HashMap<String, OwnedValue> = props
+            .get("RSN")
+            .and_then(|v| HashMap::<String, OwnedValue>::try_from(v.clone()).ok())
+            .unwrap_or_default();
         Some(Bss {
             ssid,
             bssid,
@@ -782,6 +836,7 @@ impl WlanProvider for WpaSupplicant {
             self.remove_owned_blobs(&proxy).await;
             return Err(dbus_error(error));
         }
+        self.refresh_link(&path).await;
         Ok(())
     }
 

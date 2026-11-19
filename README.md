@@ -25,7 +25,7 @@ to drive them: a desktop shell, a settings panel, a casting service, a CLI.
   store, private keys are sealed with `systemd-creds`, and
   `wpa_supplicant` receives them as in-memory blobs.
 
-Status: **v0.0.1.** Station, P2P, SoftAP, and 802.1X paths are implemented
+Status: **v0.0.2.** Station, P2P, SoftAP, and 802.1X paths are implemented
 and tested end to end against the real systemd-networkd. Real-radio
 validation is the open gate: see
 [docs/hardware-validation.md](docs/hardware-validation.md).
@@ -52,9 +52,18 @@ validation is the open gate: see
 
 ## Documentation
 
-- **[Getting Started](docs/tutorials/getting-started.md)**: build the workspace, verify the e2e lab, and join a Wi-Fi network.
-- **[How-To Guides](docs/how-to/index.md)**: manage profiles (including 802.1X), run a hotspot (SoftAP), use Wi-Fi Direct (P2P) / Miracast, and deploy with systemd.
-- **[Reference](docs/reference/index.md)**: [CLI & Daemon Commands](docs/reference/commands.md), [Configuration & Storage](docs/reference/configuration.md), [State Model](docs/reference/state-model.md), and [D-Bus API](docs/dbus-api.md).
+Start at the **[Documentation Hub](docs/index.md)**, or jump directly to a section:
+
+- **[Getting Started](docs/tutorials/getting-started.md)**: build Kestrel, verify with the unprivileged e2e lab, install system files, and join your first Wi-Fi network.
+- **[How-To Guides](docs/how-to/index.md)**:
+  - [Install, Switch Backends, and Uninstall](docs/how-to/install-and-migrate.md) (systemd, `wpa_supplicant`/`iwd`, NetworkManager migration, `.network.d/` drop-ins, rollback)
+  - [Wi-Fi and Network Profiles](docs/how-to/wifi-and-profiles.md) (daily Wi-Fi, priorities, static IP/DNS, unmanaged L3)
+  - [802.1X Enterprise Wi-Fi and Certificates](docs/how-to/enterprise-8021x.md) (PEAP, TTLS, EAP-TLS, EAP-PWD, certificate store)
+  - [Run a Hotspot (SoftAP)](docs/how-to/hotspot.md)
+  - [Wi-Fi Direct (P2P) and Miracast](docs/how-to/p2p-and-miracast.md)
+  - [Scripting, Agents, and Polkit](docs/how-to/scripting-and-agents.md)
+  - [Troubleshooting](docs/how-to/troubleshooting.md)
+- **[Reference](docs/reference/index.md)**: [CLI & Daemon Commands](docs/reference/commands.md), [Configuration & Storage](docs/reference/configuration.md), [Failures, Errors, and Capabilities](docs/reference/failures-and-errors.md), [State Model](docs/reference/state-model.md), and [D-Bus API](docs/dbus-api.md).
 - **[Explanation](docs/explanation/index.md)**: [Architecture Overview](docs/explanation/architecture-overview.md), [Ownership & Crash Safety](docs/explanation/ownership-and-crash-safety.md), and [Power & rfkill](docs/explanation/power-and-rfkill.md).
 - **[Architecture & ADRs](ARCHITECTURE.md)**: system design, [Roadmap](ROADMAP.md), and [Architecture Decision Records](docs/adr/README.md).
 - **[Contributor Docs](docs/dev/subsystems.md)**: [Subsystem Architecture](docs/dev/subsystems.md), [Build & Run](docs/dev/build-and-run.md), [Testing](docs/dev/testing.md), and [Hardware Validation](docs/hardware-validation.md).
@@ -74,41 +83,27 @@ The e2e lab needs `unshare --map-auto` (subordinate IDs for your user),
 
 ## Install
 
-| File | Destination |
-|---|---|
-| `target/release/kestrel` | `/usr/bin/` |
-| `target/release/kestrel-daemon` | `/usr/libexec/` |
-| `data/kestrel.service` | `/usr/lib/systemd/system/kestrel.service` |
-| `data/kestrel.tmpfiles.conf` | `/usr/lib/tmpfiles.d/kestrel.conf` |
-| `data/com.hihusky.Kestrel.conf` | `/usr/share/dbus-1/system.d/` |
-| `data/com.hihusky.Kestrel.service` | `/usr/share/dbus-1/system-services/` |
-| `data/com.hihusky.kestrel.policy` | `/usr/share/polkit-1/actions/` |
-| `README.md`, `ARCHITECTURE.md`, `LICENSE`, `docs/` | `/usr/share/doc/kestrel/` |
-| `config.example.toml` | `/etc/kestrel/kestrel.toml.example` (copy to `kestrel.toml` to customize) |
-
-Then:
+Build and install the binaries, systemd unit, tmpfiles snippet, D-Bus and
+polkit policies, example configuration, and documentation with `Makefile`
+(honors `PREFIX` and `DESTDIR`):
 
 ```sh
-cargo build --release
-# copy the files above, then:
-systemd-tmpfiles --create kestrel.conf      # /run/systemd/network
-systemd-creds setup                         # credential host key, once
-systemctl reload dbus
-systemctl enable --now kestrel              # also enables D-Bus activation
+make build
+sudo make install
+sudo systemd-tmpfiles --create kestrel.conf   # /run/systemd/network
+sudo systemd-creds setup                      # credential host key, once
+sudo systemctl reload dbus
+sudo systemctl enable --now kestrel           # also enables D-Bus activation
 ```
 
-Prerequisites:
-- systemd-networkd and systemd-resolved running.
-- Either `wpa_supplicant` with D-Bus control and no saved networks (the stock
-  `wpa_supplicant.service` running `wpa_supplicant -u`, which Kestrel attaches
-  interfaces to over D-Bus, or `wpa_supplicant -u -i wlp0s20f3 -c /dev/null`),
-  or iwd with `EnableNetworkConfiguration=false`.
-- Administrator `.network.d/` drop-ins (such as `RoutingPolicyRule`) intended
-  to apply alongside Kestrel's runtime unit on `<link>` may be placed in
-  `/etc/systemd/network/10-kestrel-<link>.network.d/*.conf`.
+Prerequisites (see [Install, Switch Backends, and Uninstall](docs/how-to/install-and-migrate.md) for full details and rollback):
+- `kestrel.service` declares `Conflicts=NetworkManager.service connman.service`; disable them before enabling Kestrel.
+- `systemd-networkd` and `systemd-resolved` running.
+- Either `wpa_supplicant` with D-Bus control (`wpa_supplicant -u`) and no saved networks, or `iwd` with `EnableNetworkConfiguration=false`.
+- Optional administrator `.network.d/` drop-ins for `<link>` go in `/etc/systemd/network/10-kestrel-<link>.network.d/*.conf`.
 
 The unit runs `kestrel-daemon` as root with **no capabilities**, a syscall
-allow-list, AF_UNIX sockets only, and a read-only system except
+allow-list, `AF_UNIX` sockets only, and a read-only system except
 `/var/lib/kestrel` and `/run/systemd/network`. `systemd-analyze security`
 rates its exposure 1.3. `scripts/check-system-files.sh`
 re-verifies every file in `data/` and runs the daemon inside the unit's

@@ -7,6 +7,23 @@ where applicable), and docs are complete. Anything that needs real radios is
 marked **needs hardware** until [the hardware gate](docs/hardware-validation.md)
 has been run with evidence kept.
 
+## v0.0.2: D-Bus monitor resilience, wire-faithful wpa_supplicant, and user docs (done)
+
+- Non-blocking D-Bus signal drain/worker split across `kestrel-wlan-wpa`,
+  `kestrel-wlan-iwd`, `kestrel-l3-networkd`, `kestrel-daemon/power`, and
+  `kestrel-cli/agent` with interface/path-scoped `MatchRule`s and unique bus
+  owner verification ([ADR-0009](docs/adr/0009-non-blocking-dbus-signal-monitors-and-wire-faithful-adapters.md)).
+- Wire-faithful `wpa_supplicant` adapter and `FakeWpa`: native
+  `fi.w1.wpa_supplicant1.Interface.PropertiesChanged(a{sv})`, integer
+  `GONegotiationSuccess["role_go"]`, and single-RTT `Properties.GetAll` for
+  BSS and P2P peer reads.
+- Bounded graceful shutdown budgets in `kestrel-controller` and `kestrel-api`.
+- CLI improvements in `kestrel wifi join` (skip redundant profile updates on
+  unchanged saved profiles and track rapid state transitions in wait loops).
+- Restructured user documentation under [docs/index.md](docs/index.md) with
+  end-to-end getting started, NetworkManager migration/rollback, 802.1X,
+  scripting/agents/polkit, troubleshooting, and failure/capability references.
+
 ## v0.0.1: initial release (done)
 
 - Sans-IO station, P2P session, and SoftAP hotspot state machines with

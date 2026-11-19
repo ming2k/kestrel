@@ -61,6 +61,19 @@ struct Inner {
     bound: Mutex<BTreeMap<InterfaceName, L3Intent>>,
     last: Mutex<BTreeMap<InterfaceName, L3Status>>,
     events: EventBus<L3Event>,
+    monitor_tasks: Mutex<Vec<tokio::task::AbortHandle>>,
+}
+
+impl Drop for Inner {
+    fn drop(&mut self) {
+        let tasks = self
+            .monitor_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        for task in tasks.iter() {
+            task.abort();
+        }
+    }
 }
 
 /// The systemd-networkd L3 provider.
@@ -79,6 +92,7 @@ impl Networkd {
             bound: Mutex::new(BTreeMap::new()),
             last: Mutex::new(BTreeMap::new()),
             events: EventBus::new(),
+            monitor_tasks: Mutex::new(Vec::new()),
         });
         let rule = zbus::MatchRule::builder()
             .msg_type(Type::Signal)
@@ -91,7 +105,25 @@ impl Networkd {
         let stream = zbus::MessageStream::for_match_rule(rule, &inner.connection, None)
             .await
             .map_err(dbus_error)?;
-        tokio::spawn(monitor(Arc::downgrade(&inner), stream));
+        let wake = Arc::new(tokio::sync::Notify::new());
+        let drain_weak = Arc::downgrade(&inner);
+        let drain_wake = Arc::clone(&wake);
+        let drain = tokio::spawn(async move {
+            let mut stream = stream;
+            while stream.next().await.is_some() {
+                if drain_weak.strong_count() == 0 {
+                    return;
+                }
+                drain_wake.notify_one();
+            }
+            tracing::warn!("networkd signal stream ended; relying on polling");
+        });
+        let worker = tokio::spawn(monitor(Arc::downgrade(&inner), wake));
+        inner
+            .monitor_tasks
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .extend([drain.abort_handle(), worker.abort_handle()]);
         Ok(Self { inner })
     }
 
@@ -226,28 +258,16 @@ impl Inner {
     }
 }
 
-async fn monitor(inner: Weak<Inner>, signals: zbus::MessageStream) {
+async fn monitor(inner: Weak<Inner>, wake: Arc<tokio::sync::Notify>) {
     let poll = match inner.upgrade() {
         Some(inner) => inner.config.poll_interval.max(Duration::from_millis(100)),
         None => return,
     };
-    let mut signals = Some(signals);
     let mut ticker = tokio::time::interval(poll);
     ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
     loop {
-        let next_signal = async {
-            match signals.as_mut() {
-                Some(stream) => stream.next().await,
-                None => std::future::pending().await,
-            }
-        };
         tokio::select! {
-            message = next_signal => {
-                if message.is_none() {
-                    tracing::warn!("networkd signal stream ended; relying on polling");
-                    signals = None;
-                }
-            }
+            () = wake.notified() => {}
             _ = ticker.tick() => {}
         }
         let Some(inner) = inner.upgrade() else {

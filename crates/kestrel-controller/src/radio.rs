@@ -1867,6 +1867,9 @@ impl RadioCoordinator {
     }
 
     async fn shutdown(&mut self) {
+        const EXECUTOR_SHUTDOWN_BUDGET: Duration = Duration::from_secs(10);
+        const SWEEP_SHUTDOWN_BUDGET: Duration = Duration::from_secs(5);
+
         tracing::info!("shutting down: releasing all resources");
         let ids: Vec<SessionId> = self.sessions.keys().copied().collect();
         for id in ids {
@@ -1886,14 +1889,30 @@ impl RadioCoordinator {
         if let Some(exec) = self.history_exec.take() {
             self.retired.push(exec.retire());
         }
-        for task in self.retired.drain(..) {
-            let _ = task.await;
+        let mut tasks = std::mem::take(&mut self.retired);
+        let deadline = tokio::time::Instant::now() + EXECUTOR_SHUTDOWN_BUDGET;
+        let mut aborts: Vec<tokio::task::AbortHandle> =
+            tasks.iter().map(JoinHandle::abort_handle).collect();
+        let drain_all = async {
+            for task in &mut tasks {
+                let _ = task.await;
+            }
+        };
+        if tokio::time::timeout_at(deadline, drain_all).await.is_err() {
+            tracing::warn!("shutdown executor drain timed out; aborting wedged tasks");
+            for handle in aborts.drain(..) {
+                handle.abort();
+            }
         }
-        if let Err(error) = self.ports.l3.sweep().await {
-            tracing::warn!(%error, "L3 sweep at shutdown failed");
+        match tokio::time::timeout(SWEEP_SHUTDOWN_BUDGET, self.ports.l3.sweep()).await {
+            Ok(Ok(_)) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "L3 sweep at shutdown failed"),
+            Err(_) => tracing::warn!("L3 sweep at shutdown timed out"),
         }
-        if let Err(error) = self.ports.wlan.sweep().await {
-            tracing::warn!(%error, "wireless sweep at shutdown failed");
+        match tokio::time::timeout(SWEEP_SHUTDOWN_BUDGET, self.ports.wlan.sweep()).await {
+            Ok(Ok(())) => {}
+            Ok(Err(error)) => tracing::warn!(%error, "wireless sweep at shutdown failed"),
+            Err(_) => tracing::warn!("wireless sweep at shutdown timed out"),
         }
     }
 }

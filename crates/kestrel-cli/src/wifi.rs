@@ -388,22 +388,33 @@ async fn wifi_join(client: &Client, args: JoinArgs, json: bool) -> zbus::Result<
         )));
     }
     let existing = existing.into_iter().next();
-    let unmanaged = if let Some(profile) = &existing {
-        setting_string(&profile.settings().await?, "l3") == "unmanaged"
+    let (unmanaged, existing_security) = if let Some(profile) = &existing {
+        let existing_settings = profile.settings().await?;
+        (
+            setting_string(&existing_settings, "l3") == "unmanaged",
+            Some(setting_string(&existing_settings, "security")),
+        )
     } else {
-        false
+        (false, None)
     };
     let secret = join_secret(&args, security, existing.as_ref()).await?;
     let settings = join_settings(&args, security);
     let path = if let Some(profile) = &existing {
-        let action = if secret.is_some() { "set" } else { "keep" };
-        profile
-            .update(
-                settings,
-                action,
-                secret_bundle(secret.as_deref().map(String::as_str)),
-            )
-            .await?;
+        let needs_update = secret.is_some()
+            || args.name.is_some()
+            || args.priority.is_some()
+            || args.hidden
+            || existing_security.as_deref() != Some(security.as_str());
+        if needs_update {
+            let action = if secret.is_some() { "set" } else { "keep" };
+            profile
+                .update(
+                    settings,
+                    action,
+                    secret_bundle(secret.as_deref().map(String::as_str)),
+                )
+                .await?;
+        }
         profile.inner().path().to_owned().into()
     } else {
         client
@@ -698,8 +709,16 @@ async fn wait_connected(
                 return Err(failure(format!("timed out waiting for a connection{detail}")));
             }
             event = state_changes.next() => {
-                if event.is_none() {
+                let Some(change) = event else {
                     return Err(failure("device disappeared while waiting"));
+                };
+                if let Ok(state) = change.get().await
+                    && matches!(
+                        state.as_str(),
+                        "associating" | "configuring-l3" | "connected" | "reconnecting"
+                    )
+                {
+                    saw_attempt = true;
                 }
             }
             event = failure_changes.next() => {

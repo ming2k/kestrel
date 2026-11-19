@@ -75,6 +75,16 @@ async fn acquire_sleep_inhibitor(connection: &zbus::Connection) -> Option<OwnedF
     reply.body().deserialize::<OwnedFd>().ok()
 }
 
+struct AbortOnDrop(Option<tokio::task::AbortHandle>);
+
+impl Drop for AbortOnDrop {
+    fn drop(&mut self) {
+        if let Some(handle) = self.0.take() {
+            handle.abort();
+        }
+    }
+}
+
 /// Starts watching `PrepareForSleep` on `connection` (strictly from
 /// `org.freedesktop.login1`) and hardware rfkill state in `/sys/class/rfkill`
 /// (or `$KESTREL_RFKILL_DIR`).
@@ -97,8 +107,33 @@ pub(crate) async fn watch(
         .ok();
     let initial_inhibitor = acquire_sleep_inhibitor(&connection).await;
 
+    // Drain `PrepareForSleep` on a dedicated non-blocking task so D-Bus RPCs
+    // (such as re-acquiring the sleep inhibitor) never stall `zbus`'s socket
+    // reader.
+    let (sleep_tx, mut sleep_rx) = tokio::sync::mpsc::unbounded_channel();
+    let drain_handle = stream.map(|mut s| {
+        tokio::spawn(async move {
+            while let Some(message) = s.next().await {
+                match message {
+                    Ok(msg) => {
+                        if let Ok(sleeping) = msg.body().deserialize::<bool>()
+                            && sleep_tx.send(sleeping).is_err()
+                        {
+                            return;
+                        }
+                    }
+                    Err(error) => {
+                        tracing::debug!(%error, "PrepareForSleep stream error");
+                    }
+                }
+            }
+        })
+        .abort_handle()
+    });
+
     tokio::spawn(async move {
-        let mut stream = stream;
+        let _drain_guard = AbortOnDrop(drain_handle);
+        let mut sleep_open = true;
         let mut inhibitor = initial_inhibitor;
         let mut last_hw = initial_hw;
         let mut interval = tokio::time::interval(RFKILL_POLL);
@@ -117,33 +152,29 @@ pub(crate) async fn watch(
                         }
                     }
                 }
-                message = async {
-                    match &mut stream {
-                        Some(s) => s.next().await,
-                        None => std::future::pending().await,
+                sleeping = async {
+                    if sleep_open {
+                        sleep_rx.recv().await
+                    } else {
+                        std::future::pending().await
                     }
                 } => {
-                    match message {
-                        Some(Ok(msg)) => {
-                            if let Ok(sleeping) = msg.body().deserialize::<bool>() {
-                                if radio.set_suspended(sleeping).await.is_err() {
-                                    return;
-                                }
-                                if sleeping {
-                                    // Release the delay inhibitor so logind can
-                                    // proceed with suspend now that teardown is
-                                    // queued.
-                                    drop(inhibitor.take());
-                                } else if inhibitor.is_none() {
-                                    inhibitor = acquire_sleep_inhibitor(&connection).await;
-                                }
+                    match sleeping {
+                        Some(sleeping) => {
+                            if radio.set_suspended(sleeping).await.is_err() {
+                                return;
+                            }
+                            if sleeping {
+                                // Release the delay inhibitor so logind can
+                                // proceed with suspend now that teardown is
+                                // queued.
+                                drop(inhibitor.take());
+                            } else if inhibitor.is_none() {
+                                inhibitor = acquire_sleep_inhibitor(&connection).await;
                             }
                         }
-                        Some(Err(error)) => {
-                            tracing::debug!(%error, "PrepareForSleep stream error");
-                        }
                         None => {
-                            stream = None;
+                            sleep_open = false;
                         }
                     }
                 }

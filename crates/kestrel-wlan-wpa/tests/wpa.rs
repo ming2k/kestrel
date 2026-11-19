@@ -687,3 +687,79 @@ async fn persistent_p2p_events_and_reinvocation() {
     wpa.sweep().await.unwrap();
     assert_eq!(fake.persistent_group_count(), 0);
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn signal_burst_during_large_scan_does_not_deadlock() {
+    let (_bus, fake, wpa) = setup().await;
+    fake.add_access_point("测试网络", Some("utf8-wpa2-secret"), "wpa2")
+        .await
+        .unwrap();
+    for i in 0..79 {
+        fake.add_access_point(&format!("ap-{i:02}"), None, "open")
+            .await
+            .unwrap();
+    }
+    let mut events = WlanProvider::subscribe(&wpa);
+
+    // Trigger a large scan while simultaneously flooding >64 native
+    // `Interface.PropertiesChanged` signals to prove `zbus::MessageStream`
+    // draining cannot deadlock the shared `zbus::Connection`.
+    wpa.start_scan(&wlan0()).await.unwrap();
+    fake.flood_properties_changed("wlan0", 200).await.unwrap();
+
+    let WlanEvent::ScanFinished { result, .. } = next_matching(&mut events, "large scan", |e| {
+        matches!(e, WlanEvent::ScanFinished { .. })
+    })
+    .await
+    else {
+        unreachable!()
+    };
+    let bss_list = result.unwrap();
+    assert!(
+        bss_list.len() >= 80,
+        "expected >=80 BSSs, got {}",
+        bss_list.len()
+    );
+    assert!(
+        bss_list
+            .iter()
+            .any(|b| b.ssid.to_string_lossy() == "测试网络")
+    );
+
+    WlanProvider::connect(
+        &wpa,
+        &wlan0(),
+        ConnectRequest {
+            ssid: Ssid::new("测试网络").unwrap(),
+            security: ProfileSecurity::WpaPersonal,
+            secrets: ProfileSecrets::from_passphrase(Secret::new("utf8-wpa2-secret")),
+            enterprise: None,
+            hidden: false,
+            bssid: None,
+        },
+    )
+    .await
+    .unwrap();
+    next_matching(&mut events, "utf8 ssid connected via native signal", |e| {
+        matches!(
+            e,
+            WlanEvent::Link {
+                status: LinkStatus::Connected { ssid, .. },
+                ..
+            } if ssid.to_string_lossy() == "测试网络"
+        )
+    })
+    .await;
+
+    wpa.disconnect(&wlan0()).await.unwrap();
+    next_matching(&mut events, "disconnected after burst", |e| {
+        matches!(
+            e,
+            WlanEvent::Link {
+                status: LinkStatus::Disconnected,
+                ..
+            }
+        )
+    })
+    .await;
+}

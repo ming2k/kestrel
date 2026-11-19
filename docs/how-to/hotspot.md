@@ -1,85 +1,101 @@
 # Run a Hotspot (SoftAP)
 
-Kestrel can turn an AP-capable wireless device into a hotspot while keeping
-`systemd-networkd` in charge of addressing: Kestrel asks for a shared
-subnet, and networkd serves DHCP, advertises the router, and masquerades the
-uplink. No netlink socket is opened and `kestrel-daemon` needs no
-capabilities.
+Kestrel turns an AP-capable wireless adapter into a SoftAP hotspot while keeping `systemd-networkd` in charge of L3: Kestrel allocates a `/24` subnet from `[p2p].subnet_pool`, and `systemd-networkd` serves DHCP, advertises the router, and masquerades the uplink. `kestrel-daemon` opens no netlink socket and requires no Linux capabilities.
 
-> Starting a hotspot takes the radio away from the station: any current
-> connection is torn down and autoconnect is paused until the hotspot stops.
-> A hotspot and a Wi-Fi Direct session cannot share one device (`Busy`).
+> **Radio handover & exclusion:** Starting a hotspot takes the radio away from station mode—any active Wi-Fi connection is torn down and station autoconnect is held until the hotspot stops. A hotspot and a Wi-Fi Direct (P2P) session cannot share one device (`Busy`).
 
 ---
 
-## 1. Check that the device can do it
+## 1. Verify Device AP Capability
 
 ```sh
-kestrel status --json | jq '.devices[] | {interface, capabilities}'
+kestrel --json status | jq '.devices[] | {interface, capabilities}'
 ```
 
-A device with `access-point` in `capabilities` exports
-`com.hihusky.Kestrel.Hotspot`.
+Any device listing `access-point` in `capabilities` exports `com.hihusky.Kestrel.Hotspot` and can run a hotspot.
 
 ---
 
-## 2. Start a hotspot
+## 2. Start a Hotspot
 
 ```sh
-# WPA2 with a prompted passphrase (8..=63 characters)
+# WPA2-PSK (default) with an interactive, no-echo passphrase prompt (8..=63 chars)
 kestrel hotspot start wlp0s20f3 --ssid "kestrel-ap"
 
-# Open network, channel 6
+# Open hotspot on channel 6 (2437 MHz)
 kestrel hotspot start wlp0s20f3 --ssid "kestrel-ap" --security open --frequency 2437
 
-# Non-interactively: the passphrase comes from stdin, never argv
-printf '%s\n' "$AP_PASSPHRASE" | kestrel hotspot start wlp0s20f3 --ssid "kestrel-ap" --secret-stdin
+# WPA3-SAE hotspot with hidden SSID
+kestrel hotspot start wlp0s20f3 --ssid "kestrel-ap" --security wpa3-personal --hidden
+
+# Non-interactive script: passphrase read from the first line of stdin
+printf '%s\n' "$AP_PASSPHRASE" | kestrel hotspot start wlp0s20f3 \
+  --ssid "kestrel-ap" \
+  --secret-stdin
 ```
 
-`--security` accepts `open`, `wpa-personal` (WPA2-PSK), and
-`wpa3-personal` (SAE only). `iwd` supports WPA2-PSK hotspots only; the
-others fail with `NotSupported`.
+Security mode support by backend:
+
+| `--security` | `wpa_supplicant` | `iwd` |
+| :--- | :--- | :--- |
+| `wpa-personal` (default, WPA2-PSK) | Supported | Supported |
+| `open` | Supported | Rejected (`NotSupported`) |
+| `wpa3-personal` (SAE only) | Supported (requires driver SAE AP support) | Rejected (`NotSupported`) |
 
 ---
 
-## 3. Inspect clients and leases
+## 3. Enable Uplink Internet Forwarding
+
+Kestrel writes `IPMasquerade=ipv4` into the hotspot's runtime `.network` unit (`10-kestrel-<link>.network`). For hotspot clients to reach the internet through another interface (for example wired Ethernet `enp3s0`):
+
+1. On `systemd-networkd` 256+, ensure your **uplink** `.network` unit enables IPv4 forwarding:
+
+   ```ini
+   # /etc/systemd/network/20-wired.network (or a .network.d/ drop-in)
+   [Network]
+   IPv4Forwarding=yes
+   ```
+
+   Reload networkd with `sudo networkctl reload`.
+
+2. If your host runs a restrictive firewall (`nftables`, `firewalld`, `ufw`), allow DHCP (UDP ports 67/68) on the wireless interface and forwarding from the hotspot subnet (allocated from `[p2p].subnet_pool`, starting at `192.168.49.0/24`).
+
+---
+
+## 4. Inspect Status, Leases, and Clients
 
 ```sh
 kestrel hotspot status wlp0s20f3
-kestrel hotspot status --json          # every AP-capable device
+kestrel --json hotspot status          # every AP-capable device
 ```
 
-The state moves through `starting` → `configuring-l3` → `active`. `gateway`
-shows the served subnet in CIDR form, `leases` lists the DHCP addresses
-networkd handed out, and `connected_clients` lists associated MACs.
+The hotspot progresses through `starting` → `configuring-l3` → `active`:
 
-> On `systemd-networkd` 256+, `IPMasquerade=ipv4` on the hotspot unit enables
-> forwarding on the AP link; ensure your uplink `.network` unit also permits
-> IPv4 forwarding (`IPv4Forwarding=yes`) if clients need internet access.
+- `gateway`: CIDR of the served `/24` subnet (`.1` assigned to the AP interface).
+- `leases`: DHCPv4 leases (`ipv4`, `mac`) handed out by `systemd-networkd`.
+- `connected_clients`: currently associated station MAC addresses.
 
 ---
 
-## 4. Stop and restore the station
+## 5. Stop the Hotspot and Restore Station Mode
 
 ```sh
 kestrel hotspot stop wlp0s20f3
 ```
 
-Stopping releases L3 and the AP, then re-enables station orchestration so
-autoconnect can pick the saved profile back up. A `kill -9` leaves nothing
-behind: the next start sweeps `wpa_supplicant` AP blocks, resets the `iwd`
-device mode to `station`, and removes the runtime `.network` unit.
+Stopping tears down L3, stops the AP, and restores station orchestration so autoconnect resumes automatically (unless station autoconnect was already held before the hotspot started).
+
+If `kestrel-daemon` is killed abruptly (`kill -9`), the next startup sweep removes tagged `wpa_supplicant` AP blocks, resets `iwd` AP-mode devices back to `station`, and deletes the runtime `.network` unit.
 
 ---
 
-## 5. Failure handling
+## 6. Failure Handling
+
+A failed start always rolls back the AP before returning to `stopped`, restoring station mode automatically.
 
 | `Failure` | Meaning |
-|---|---|
-| `not-supported` | the device or backend cannot run an AP with these settings (for example `wpa3-personal` on iwd) |
-| `no-subnet` | `[p2p].subnet_pool` had no free `/24` |
-| `l3-failed` | networkd did not bring the shared subnet up |
-| `backend` | the AP itself failed; `FailureDetail` has the backend message |
-
-A failed start always rolls back the AP before reporting, so the device
-returns to station mode.
+| :--- | :--- |
+| `not-supported` | Device or backend cannot run an AP with the requested settings (for example `open` or `wpa3-personal` on `iwd`). |
+| `no-subnet` | `[p2p].subnet_pool` in `/etc/kestrel/kestrel.toml` has no free `/24` subnet. |
+| `l3-failed` | `systemd-networkd` failed to configure the shared subnet or DHCP server. |
+| `backend` | The L2 backend failed to bring up the AP; inspect `failure_detail` and `journalctl -u kestrel`. |

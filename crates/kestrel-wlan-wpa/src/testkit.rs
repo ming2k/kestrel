@@ -372,14 +372,36 @@ impl FakeWpa {
     }
 
     async fn emit_state(&self, iface_path: &OwnedObjectPath) -> zbus::Result<()> {
-        let iface = self
-            .connection
-            .object_server()
-            .interface::<_, FakeInterface>(iface_path.clone())
-            .await?;
-        let guard = iface.get().await;
-        guard.state_changed(iface.signal_emitter()).await?;
-        guard.current_b_s_s_changed(iface.signal_emitter()).await
+        let (state_str, current_bss) = {
+            let state = self.lock();
+            let Some(iface) = state.ifaces.get(iface_path) else {
+                return Ok(());
+            };
+            (iface.state.clone(), iface.current_bss.clone())
+        };
+        let emitter = SignalEmitter::new(&self.connection, iface_path.clone())?;
+        // Real `wpa_supplicant` emits `fi.w1.wpa_supplicant1.Interface.PropertiesChanged(a{sv})`,
+        // not `org.freedesktop.DBus.Properties.PropertiesChanged`.
+        let props = HashMap::from([
+            ("State", Value::from(state_str.as_str())),
+            ("CurrentBSS", Value::from(current_bss.as_ref())),
+        ]);
+        FakeInterface::properties_changed(&emitter, props).await
+    }
+
+    /// Emits `count` rapid `Interface.PropertiesChanged` signals to stress
+    /// signal-stream backpressure and verify deadlock immunity.
+    pub async fn flood_properties_changed(&self, device: &str, count: usize) -> zbus::Result<()> {
+        let iface_path = self.lock().iface_by_name(device).expect("known device");
+        let emitter = SignalEmitter::new(&self.connection, iface_path)?;
+        for i in 0..count {
+            let props = HashMap::from([(
+                "DisconnectReason",
+                Value::from(i32::try_from(i).unwrap_or(0)),
+            )]);
+            FakeInterface::properties_changed(&emitter, props).await?;
+        }
+        Ok(())
     }
 
     async fn set_state(
@@ -415,9 +437,12 @@ impl FakeWpa {
     ) -> zbus::Result<()> {
         let device_path = self.lock().iface_by_name(device).expect("known device");
         let emitter = SignalEmitter::new(&self.connection, device_path)?;
-        let role = if go { "GO" } else { "client" };
-        FakeP2p::go_negotiation_success(&emitter, HashMap::from([("role_go", Value::from(role))]))
-            .await?;
+        let role_go: i32 = i32::from(go);
+        FakeP2p::go_negotiation_success(
+            &emitter,
+            HashMap::from([("role_go", Value::from(role_go))]),
+        )
+        .await?;
         self.emit_group_started(device, group_ifname, go).await
     }
 
@@ -838,6 +863,12 @@ impl FakeInterface {
         }
         Ok(())
     }
+
+    #[zbus(signal, name = "PropertiesChanged")]
+    async fn properties_changed(
+        emitter: &SignalEmitter<'_>,
+        properties: HashMap<&str, Value<'_>>,
+    ) -> zbus::Result<()>;
 
     #[zbus(signal)]
     async fn scan_done(emitter: &SignalEmitter<'_>, success: bool) -> zbus::Result<()>;

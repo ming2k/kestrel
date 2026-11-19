@@ -116,6 +116,18 @@ pub(crate) async fn run(client: &Client) -> zbus::Result<()> {
         .arg(0, BUS_NAME)
         .build()?;
     let mut owner_changes = zbus::MessageStream::for_match_rule(rule, connection, None).await?;
+    let (reregister_tx, mut reregister_rx) = tokio::sync::mpsc::unbounded_channel();
+    let drain = tokio::spawn(async move {
+        while let Some(Ok(message)) = owner_changes.next().await {
+            let Ok((name, _old, new)) = message.body().deserialize::<(String, String, String)>()
+            else {
+                continue;
+            };
+            if name == BUS_NAME && !new.is_empty() && reregister_tx.send(()).is_err() {
+                return;
+            }
+        }
+    });
 
     connection
         .object_server()
@@ -134,23 +146,18 @@ pub(crate) async fn run(client: &Client) -> zbus::Result<()> {
     loop {
         tokio::select! {
             _ = tokio::signal::ctrl_c() => break,
-            message = owner_changes.next() => {
-                let Some(Ok(message)) = message else { break };
-                let Ok((name, _old, new)) = message
-                    .body()
-                    .deserialize::<(String, String, String)>()
-                else {
-                    continue;
-                };
-                if name == BUS_NAME && !new.is_empty() {
-                    match manager.register_agent(&path).await {
-                        Ok(()) => println!("kestrel-daemon restarted; agent re-registered"),
-                        Err(error) => eprintln!("kestrel: failed to re-register agent: {error}"),
-                    }
+            event = reregister_rx.recv() => {
+                if event.is_none() {
+                    break;
+                }
+                match manager.register_agent(&path).await {
+                    Ok(()) => println!("kestrel-daemon restarted; agent re-registered"),
+                    Err(error) => eprintln!("kestrel: failed to re-register agent: {error}"),
                 }
             }
         }
     }
+    drain.abort();
     let _ = manager.unregister_agent(&path).await;
     Ok(())
 }
