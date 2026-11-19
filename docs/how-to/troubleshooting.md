@@ -77,10 +77,11 @@ Remove the override with `sudo systemctl revert kestrel && sudo systemctl restar
 
 ### `AccessDenied` when running `kestrel`
 
-- **Cause:** Polkit rejected the action. Over SSH or in an inactive session, all mutating actions require `auth_admin`; even in an active local console, profile/certificate/group modifications (`com.hihusky.kestrel.modify-profiles`) require `auth_admin_keep`. If no polkit authentication agent is running in your session (common in minimal tiling WMs or bare terminals), `polkitd` cannot prompt for a password and immediately returns `AccessDenied`.
+- **Cause:** Polkit rejected the action. Active local seat sessions are authorized by default (`yes`), whereas remote SSH or inactive sessions require `auth_admin_keep` (or a custom local rule restricted the action). When running in an interactive terminal, `kestrel` checks authorization before prompting for secrets and launches `pkttyagent --fallback` automatically; in non-interactive scripts or hosts without `pkttyagent` and without a desktop polkit agent, `polkitd` returns `AccessDenied`.
 - **Fix:**
-  - Start a desktop polkit authentication agent, or run `pkttyagent --process $$ &` in your terminal before invoking `kestrel`, or run with `sudo kestrel ...`.
-  - To allow a local user group to modify profiles without a password prompt, add a polkit rule as shown in [Scripting, Agents, and Polkit](scripting-and-agents.md#4-polkit-authorization-and-custom-rules).
+  - Verify your session is an active local seat (`loginctl session-status`) or run with `sudo kestrel ...` over SSH / in non-interactive scripts.
+  - Ensure `pkttyagent` (part of `polkit`) or a desktop polkit authentication agent is installed when authenticating interactively.
+  - To customize authorization rules, see [Scripting, Agents, and Polkit](scripting-and-agents.md#4-polkit-authorization-and-custom-rules).
 
 ### `NotSupported` on WPA3-only, OWE, 802.1X, P2P, or Hotspot
 

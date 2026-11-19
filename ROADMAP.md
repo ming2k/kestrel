@@ -7,6 +7,16 @@ where applicable), and docs are complete. Anything that needs real radios is
 marked **needs hardware** until [the hardware gate](docs/hardware-validation.md)
 has been run with evidence kept.
 
+## v0.0.3: local-seat polkit defaults and CLI authorization preflight (done)
+
+- Allow active local seat sessions to join, modify, and forget wireless
+  profiles without root prompts (`com.hihusky.kestrel.modify-profiles`
+  `allow_active=yes`); keep inactive and remote sessions protected with
+  `auth_admin_keep`.
+- Add system-bus polkit authorization preflight in `kestrel` before prompting
+  for Wi-Fi passphrases, WPS PINs, or delete confirmations, with automatic
+  `pkttyagent --fallback` support on interactive terminals.
+
 ## v0.0.2: D-Bus monitor resilience, wire-faithful wpa_supplicant, and user docs (done)
 
 - Non-blocking D-Bus signal drain/worker split across `kestrel-wlan-wpa`,

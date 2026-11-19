@@ -138,7 +138,7 @@ Join a network by SSID. Kestrel scans to infer the security mode, prompts for th
 kestrel wifi join wlp0s20f3 "MyNetwork"
 ```
 
-> Polkit authorizes active local console sessions to connect without a password prompt. Creating or modifying a saved profile (`wifi join` for a new network, `profile add/edit/delete`) prompts for administrator authentication (`auth_admin_keep`).
+> Polkit authorizes active local seat sessions to join, modify, and forget wireless networks without a root password prompt. Remote SSH and inactive sessions require administrator authentication (`auth_admin_keep`); `kestrel` checks authorization before prompting for a Wi-Fi passphrase and automatically spawns `pkttyagent --fallback` on terminals when needed.
 
 Confirm your link status, IP address, DNS, and recent connection history:
 

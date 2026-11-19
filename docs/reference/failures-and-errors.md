@@ -57,11 +57,11 @@ Read-only D-Bus calls require no polkit authorization. Root is always authorized
 
 | Action ID | Covered Operations | `allow_active` | `allow_inactive` | `allow_any` |
 | :--- | :--- | :--- | :--- | :--- |
-| `com.hihusky.kestrel.connect` | `Device.Scan`, `Connect`, `Disconnect`, `SetAutoconnect`; all `P2P.*` methods; `Session.Close` | `yes` | `auth_admin` | `auth_admin` |
-| `com.hihusky.kestrel.hotspot` | `Hotspot.Start`, `Hotspot.Stop` | `yes` | `auth_admin` | `auth_admin` |
-| `com.hihusky.kestrel.modify-profiles` | `Manager.AddProfile`, `ImportCertificate`; `Profile.Update`, `Delete`; `Certificate.Delete`; `P2pGroup.Delete` | `auth_admin_keep` | `auth_admin` | `auth_admin` |
-| `com.hihusky.kestrel.toggle-wireless` | `Manager.SetWirelessEnabled` | `yes` | `auth_admin` | `auth_admin` |
-| `com.hihusky.kestrel.register-agent` | `Manager.RegisterAgent` | `yes` | `auth_admin` | `auth_admin` |
+| `com.hihusky.kestrel.connect` | `Device.Scan`, `Connect`, `Disconnect`, `SetAutoconnect`; all `P2P.*` methods; `Session.Close` | `yes` | `auth_admin_keep` | `auth_admin_keep` |
+| `com.hihusky.kestrel.hotspot` | `Hotspot.Start`, `Hotspot.Stop` | `yes` | `auth_admin_keep` | `auth_admin_keep` |
+| `com.hihusky.kestrel.modify-profiles` | `Manager.AddProfile`, `ImportCertificate`; `Profile.Update`, `Delete`; `Certificate.Delete`; `P2pGroup.Delete` | `yes` | `auth_admin_keep` | `auth_admin_keep` |
+| `com.hihusky.kestrel.toggle-wireless` | `Manager.SetWirelessEnabled` | `yes` | `auth_admin_keep` | `auth_admin_keep` |
+| `com.hihusky.kestrel.register-agent` | `Manager.RegisterAgent` | `yes` | `auth_admin_keep` | `auth_admin_keep` |
 
 ---
 

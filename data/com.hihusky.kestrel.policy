@@ -3,7 +3,9 @@
  "http://www.freedesktop.org/standards/PolicyKit/1/policyconfig.dtd">
 <!-- SPDX-License-Identifier: LGPL-2.1-or-later -->
 <!-- Install to /usr/share/polkit-1/actions/com.hihusky.kestrel.policy.
-     Root is always authorized by polkit. -->
+     Root is always authorized by polkit. Active local seat sessions may
+     manage wireless connections and saved networks without prompting;
+     inactive and remote sessions require administrator authentication. -->
 <policyconfig>
   <vendor>Kestrel</vendor>
 
@@ -11,8 +13,8 @@
     <description>Connect to and disconnect from wireless networks</description>
     <message>Authentication is required to change the wireless connection</message>
     <defaults>
-      <allow_any>auth_admin</allow_any>
-      <allow_inactive>auth_admin</allow_inactive>
+      <allow_any>auth_admin_keep</allow_any>
+      <allow_inactive>auth_admin_keep</allow_inactive>
       <allow_active>yes</allow_active>
     </defaults>
   </action>
@@ -21,8 +23,8 @@
     <description>Start and stop wireless hotspots (SoftAP)</description>
     <message>Authentication is required to start or stop a wireless hotspot</message>
     <defaults>
-      <allow_any>auth_admin</allow_any>
-      <allow_inactive>auth_admin</allow_inactive>
+      <allow_any>auth_admin_keep</allow_any>
+      <allow_inactive>auth_admin_keep</allow_inactive>
       <allow_active>yes</allow_active>
     </defaults>
   </action>
@@ -31,9 +33,9 @@
     <description>Create, change, or delete saved networks</description>
     <message>Authentication is required to change saved networks</message>
     <defaults>
-      <allow_any>auth_admin</allow_any>
-      <allow_inactive>auth_admin</allow_inactive>
-      <allow_active>auth_admin_keep</allow_active>
+      <allow_any>auth_admin_keep</allow_any>
+      <allow_inactive>auth_admin_keep</allow_inactive>
+      <allow_active>yes</allow_active>
     </defaults>
   </action>
 
@@ -41,22 +43,22 @@
     <description>Turn wireless on or off</description>
     <message>Authentication is required to turn wireless on or off</message>
     <defaults>
-      <allow_any>auth_admin</allow_any>
-      <allow_inactive>auth_admin</allow_inactive>
+      <allow_any>auth_admin_keep</allow_any>
+      <allow_inactive>auth_admin_keep</allow_inactive>
       <allow_active>yes</allow_active>
     </defaults>
   </action>
 
   <!-- Desktop compositors and status bars on the active local seat register
        their agent at login without prompting for root. Inactive and remote
-       sessions still require auth_admin, and the daemon enforces single-slot
-       ownership with bus-owner disconnect verification. -->
+       sessions still require auth_admin_keep, and the daemon enforces
+       single-slot ownership with bus-owner disconnect verification. -->
   <action id="com.hihusky.kestrel.register-agent">
     <description>Answer password and pairing requests</description>
     <message>Authentication is required to handle network prompts</message>
     <defaults>
-      <allow_any>auth_admin</allow_any>
-      <allow_inactive>auth_admin</allow_inactive>
+      <allow_any>auth_admin_keep</allow_any>
+      <allow_inactive>auth_admin_keep</allow_inactive>
       <allow_active>yes</allow_active>
     </defaults>
   </action>

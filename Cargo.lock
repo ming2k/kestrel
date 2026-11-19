@@ -373,7 +373,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-api"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -392,7 +392,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-catalog"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "kestrel-model",
  "kestrel-ports",
@@ -404,7 +404,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-cli"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "clap",
  "futures-util",
@@ -419,7 +419,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-controller"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "kestrel-catalog",
@@ -434,7 +434,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-daemon"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "clap",
@@ -460,7 +460,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-e2e"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "kestrel-api",
  "kestrel-wlan-wpa",
@@ -473,7 +473,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-l3-networkd"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -488,7 +488,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-machines"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "kestrel-model",
  "proptest",
@@ -496,7 +496,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-model"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "ipnet",
  "serde",
@@ -508,7 +508,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-ports"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "kestrel-model",
@@ -518,7 +518,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-store"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "kestrel-model",
@@ -534,7 +534,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-testkit"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "kestrel-model",
@@ -544,7 +544,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-tests"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "kestrel-api",
@@ -564,7 +564,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-wlan-iwd"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -578,7 +578,7 @@ dependencies = [
 
 [[package]]
 name = "kestrel-wlan-wpa"
-version = "0.0.2"
+version = "0.0.3"
 dependencies = [
  "async-trait",
  "futures-util",

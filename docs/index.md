@@ -34,6 +34,6 @@ Public documentation follows the Diátaxis four-quadrant layout:
 
 ## Project & Contributor Docs
 
-- **[Project README](../README.md)** and **[Roadmap](../ROADMAP.md)** (note: Kestrel is at v0.0.2; real-radio validation is tracked in [Hardware Validation](hardware-validation.md)).
+- **[Project README](../README.md)** and **[Roadmap](../ROADMAP.md)** (note: Kestrel is at v0.0.3; real-radio validation is tracked in [Hardware Validation](hardware-validation.md)).
 - **[Architecture](../ARCHITECTURE.md)** and **[Architecture Decision Records](adr/README.md)**.
 - **[Contributor Documentation](dev/build-and-run.md)**: [Build & Run](dev/build-and-run.md), [Testing](dev/testing.md), [Subsystems](dev/subsystems.md), and [Documentation Standards](dev/standards/taxonomy.md).

@@ -21,6 +21,7 @@ use crate::common::{
     profiles_by_ssid, prompt_secret, resolve_profile, secret_bundle, setting_string, signal_text,
     stdin_secret,
 };
+use crate::polkit;
 use crate::profile::forget;
 
 #[derive(Debug, Subcommand)]
@@ -200,7 +201,7 @@ fn print_status_overview(value: &Value) {
     );
 }
 
-pub(crate) async fn run(client: &Client, command: Wifi, json: bool) -> zbus::Result<()> {
+pub(crate) async fn run(client: &Client, bus: &str, command: Wifi, json: bool) -> zbus::Result<()> {
     match command {
         Wifi::Status { device } => wifi_status(client, device.as_deref(), json).await,
         Wifi::Scan { device, all } => {
@@ -214,8 +215,8 @@ pub(crate) async fn run(client: &Client, command: Wifi, json: bool) -> zbus::Res
             print_scan(json, &results, all);
             Ok(())
         }
-        Wifi::Join(args) => wifi_join(client, args, json).await,
-        Wifi::Connect(args) => wifi_connect(client, args, json).await,
+        Wifi::Join(args) => wifi_join(client, bus, args, json).await,
+        Wifi::Connect(args) => wifi_connect(client, bus, args, json).await,
         Wifi::Disconnect { device } => {
             client.device(&device).await?.disconnect().await?;
             print(
@@ -361,7 +362,7 @@ fn print_wifi_status(value: &Value) {
     }
 }
 
-async fn wifi_join(client: &Client, args: JoinArgs, json: bool) -> zbus::Result<()> {
+async fn wifi_join(client: &Client, bus: &str, args: JoinArgs, json: bool) -> zbus::Result<()> {
     let device = client.device(&args.device).await?;
     let security = match args.security.as_deref() {
         Some(security) => {
@@ -388,15 +389,37 @@ async fn wifi_join(client: &Client, args: JoinArgs, json: bool) -> zbus::Result<
         )));
     }
     let existing = existing.into_iter().next();
-    let (unmanaged, existing_security) = if let Some(profile) = &existing {
+    let (unmanaged, existing_security, existing_has_secret) = if let Some(profile) = &existing {
         let existing_settings = profile.settings().await?;
         (
             setting_string(&existing_settings, "l3") == "unmanaged",
             Some(setting_string(&existing_settings, "security")),
+            profile.has_secret().await?,
         )
     } else {
-        (false, None)
+        (false, None, false)
     };
+    let will_prompt_or_set_secret = args.secret_stdin
+        || args.ask_secret
+        || (security.needs_secret()
+            && !(existing.is_some()
+                && existing_security.as_deref() == Some(security.as_str())
+                && existing_has_secret));
+    let will_modify = existing.is_none()
+        || will_prompt_or_set_secret
+        || args.name.is_some()
+        || args.priority.is_some()
+        || args.hidden
+        || existing_security.as_deref() != Some(security.as_str());
+    let _modify_guard = if will_modify {
+        Some(
+            polkit::ensure_authorized(client.connection(), bus, &[polkit::ACTION_MODIFY_PROFILES])
+                .await?,
+        )
+    } else {
+        None
+    };
+
     let secret = join_secret(&args, security, existing.as_ref()).await?;
     let settings = join_settings(&args, security);
     let path = if let Some(profile) = &existing {
@@ -440,13 +463,29 @@ async fn wifi_join(client: &Client, args: JoinArgs, json: bool) -> zbus::Result<
     .await
 }
 
-async fn wifi_connect(client: &Client, args: ConnectArgs, json: bool) -> zbus::Result<()> {
+async fn wifi_connect(
+    client: &Client,
+    bus: &str,
+    args: ConnectArgs,
+    json: bool,
+) -> zbus::Result<()> {
     let path = resolve_profile(client, &args.profile).await?;
     let profile = client.profile(path.clone()).await?;
     let settings = profile.settings().await?;
     let security = profile_security(&settings)?;
     let unmanaged = setting_string(&settings, "l3") == "unmanaged";
     let is_eap_tls = setting_string(&settings, "enterprise.eap") == "tls";
+    let needs_secret_update = args.secret_stdin
+        || args.ask_secret
+        || (security.needs_secret() && !profile.has_secret().await?);
+    let _modify_guard = if needs_secret_update {
+        Some(
+            polkit::ensure_authorized(client.connection(), bus, &[polkit::ACTION_MODIFY_PROFILES])
+                .await?,
+        )
+    } else {
+        None
+    };
     if args.secret_stdin || args.ask_secret {
         let secret = if args.secret_stdin {
             stdin_secret()?

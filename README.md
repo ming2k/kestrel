@@ -25,7 +25,7 @@ to drive them: a desktop shell, a settings panel, a casting service, a CLI.
   store, private keys are sealed with `systemd-creds`, and
   `wpa_supplicant` receives them as in-memory blobs.
 
-Status: **v0.0.2.** Station, P2P, SoftAP, and 802.1X paths are implemented
+Status: **v0.0.3.** Station, P2P, SoftAP, and 802.1X paths are implemented
 and tested end to end against the real systemd-networkd. Real-radio
 validation is the open gate: see
 [docs/hardware-validation.md](docs/hardware-validation.md).

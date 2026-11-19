@@ -12,6 +12,7 @@ mod common;
 mod hotspot;
 mod monitor;
 mod p2p;
+mod polkit;
 mod profile;
 mod wifi;
 
@@ -23,7 +24,7 @@ use kestrel_api::client::Client;
 use crate::cert::Certificate;
 use crate::common::failure;
 use crate::hotspot::Hotspot;
-use crate::p2p::P2p;
+use crate::p2p::{P2p, P2pGroups};
 use crate::profile::Profile;
 use crate::wifi::Wifi;
 
@@ -105,15 +106,64 @@ fn describe(error: zbus::Error) -> String {
     }
 }
 
+fn required_polkit_actions(command: &Command) -> &'static [&'static str] {
+    match command {
+        Command::Status { .. }
+        | Command::Monitor
+        | Command::Wifi(Wifi::Status { .. } | Wifi::List { .. } | Wifi::History { .. })
+        | Command::Profile(Profile::List | Profile::Show { .. })
+        | Command::Certificate(Certificate::List | Certificate::Show { .. })
+        | Command::P2p(
+            P2p::Peers { .. }
+            | P2p::Sessions
+            | P2p::Groups(P2pGroups::List | P2pGroups::Show { .. }),
+        )
+        | Command::Hotspot(Hotspot::Status { .. }) => &[],
+
+        Command::Wifi(
+            Wifi::Scan { .. }
+            | Wifi::Join(_)
+            | Wifi::Connect(_)
+            | Wifi::Disconnect { .. }
+            | Wifi::Autoconnect { .. },
+        )
+        | Command::P2p(
+            P2p::Find { .. }
+            | P2p::Wfd { .. }
+            | P2p::Connect(_)
+            | P2p::StartGroup { .. }
+            | P2p::Reconnect { .. }
+            | P2p::Close { .. },
+        ) => &[polkit::ACTION_CONNECT],
+
+        Command::Wifi(Wifi::On | Wifi::Off) => &[polkit::ACTION_TOGGLE_WIRELESS],
+
+        Command::Wifi(Wifi::Forget { .. })
+        | Command::Profile(Profile::Add(_) | Profile::Edit { .. } | Profile::Delete { .. })
+        | Command::Certificate(Certificate::Add { .. } | Certificate::Delete { .. })
+        | Command::P2p(P2p::Groups(P2pGroups::Delete { .. })) => &[polkit::ACTION_MODIFY_PROFILES],
+
+        Command::Hotspot(Hotspot::Start(_) | Hotspot::Stop { .. }) => &[polkit::ACTION_HOTSPOT],
+
+        Command::Agent => &[polkit::ACTION_REGISTER_AGENT],
+    }
+}
+
 async fn run(cli: Cli) -> zbus::Result<()> {
     let connection = kestrel_api::bus::connect(&cli.bus)
         .await
         .map_err(|e| failure(format!("cannot connect to the {} bus: {e}", cli.bus)))?;
     let client = Client::new(connection).await?;
+    let _polkit_guard = polkit::ensure_authorized(
+        client.connection(),
+        &cli.bus,
+        required_polkit_actions(&cli.command),
+    )
+    .await?;
     let json = cli.json;
     match cli.command {
         Command::Status { watch } => wifi::status(&client, json, watch).await,
-        Command::Wifi(command) => wifi::run(&client, command, json).await,
+        Command::Wifi(command) => wifi::run(&client, &cli.bus, command, json).await,
         Command::Profile(command) => profile::run(&client, command, json).await,
         Command::P2p(command) => p2p::run(&client, command, json).await,
         Command::Hotspot(command) => hotspot::run(&client, command, json).await,
@@ -376,5 +426,36 @@ mod tests {
         let ok = common::read_bounded_reader(&b"hello"[..], 5, "test").unwrap();
         assert_eq!(ok, "hello");
         assert!(common::read_bounded_reader(&b"hello!"[..], 5, "test").is_err());
+    }
+
+    #[test]
+    fn required_polkit_actions_cover_reads_and_mutations() {
+        let read = Cli::try_parse_from(["kestrel", "wifi", "status", "wlan0"]).unwrap();
+        assert_eq!(required_polkit_actions(&read.command), &[] as &[&str]);
+
+        let join = Cli::try_parse_from(["kestrel", "wifi", "join", "wlan0", "home"]).unwrap();
+        assert_eq!(
+            required_polkit_actions(&join.command),
+            &[polkit::ACTION_CONNECT]
+        );
+
+        let forget = Cli::try_parse_from(["kestrel", "wifi", "forget", "home"]).unwrap();
+        assert_eq!(
+            required_polkit_actions(&forget.command),
+            &[polkit::ACTION_MODIFY_PROFILES]
+        );
+
+        let hotspot =
+            Cli::try_parse_from(["kestrel", "hotspot", "start", "wlan0", "--ssid", "ap"]).unwrap();
+        assert_eq!(
+            required_polkit_actions(&hotspot.command),
+            &[polkit::ACTION_HOTSPOT]
+        );
+
+        let toggle = Cli::try_parse_from(["kestrel", "wifi", "off"]).unwrap();
+        assert_eq!(
+            required_polkit_actions(&toggle.command),
+            &[polkit::ACTION_TOGGLE_WIRELESS]
+        );
     }
 }

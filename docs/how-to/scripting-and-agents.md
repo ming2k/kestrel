@@ -88,25 +88,23 @@ Read operations (such as `status`, `wifi status`, `wifi list`, `wifi history`, `
 
 | Polkit Action | Operations | Active Local Session | Inactive / Remote Session |
 | :--- | :--- | :--- | :--- |
-| `com.hihusky.kestrel.connect` | Scan, connect, disconnect, autoconnect, P2P discovery/sessions/WFD | `yes` | `auth_admin` |
-| `com.hihusky.kestrel.hotspot` | Start and stop SoftAP hotspots | `yes` | `auth_admin` |
-| `com.hihusky.kestrel.modify-profiles` | Add/edit/delete profiles, import/delete certificates, delete persistent P2P groups | `auth_admin_keep` | `auth_admin` |
-| `com.hihusky.kestrel.toggle-wireless` | `wifi on`, `wifi off` | `yes` | `auth_admin` |
-| `com.hihusky.kestrel.register-agent` | `kestrel agent` / desktop agent registration | `yes` | `auth_admin` |
+| `com.hihusky.kestrel.connect` | Scan, connect, disconnect, autoconnect, P2P discovery/sessions/WFD | `yes` | `auth_admin_keep` |
+| `com.hihusky.kestrel.hotspot` | Start and stop SoftAP hotspots | `yes` | `auth_admin_keep` |
+| `com.hihusky.kestrel.modify-profiles` | Add/edit/delete profiles, import/delete certificates, delete persistent P2P groups | `yes` | `auth_admin_keep` |
+| `com.hihusky.kestrel.toggle-wireless` | `wifi on`, `wifi off` | `yes` | `auth_admin_keep` |
+| `com.hihusky.kestrel.register-agent` | `kestrel agent` / desktop agent registration | `yes` | `auth_admin_keep` |
 
-Root is always authorized by polkit.
+Root is always authorized by polkit. When `kestrel` runs on the system bus, it checks polkit authorization **before** prompting for a Wi-Fi passphrase, WPS PIN, or delete confirmation, and automatically spawns `pkttyagent --fallback` on interactive terminals if no desktop polkit agent is running.
 
-### Allowing a Local Group to Modify Profiles Without a Password
+### Restricting Profile Changes on Multi-User Systems
 
-On a single-user workstation or dedicated appliance, you can grant members of a group (for example `wheel` or `netdev`) passwordless profile changes by installing a polkit rule at `/etc/polkit-1/rules.d/50-kestrel.rules`:
+On a shared multi-user machine where only administrators should modify saved networks, tighten `com.hihusky.kestrel.modify-profiles` with a polkit rule at `/etc/polkit-1/rules.d/50-kestrel.rules`:
 
 ```javascript
 polkit.addRule(function(action, subject) {
     if (action.id === "com.hihusky.kestrel.modify-profiles" &&
-        subject.isInGroup("wheel") &&
-        subject.local &&
-        subject.active) {
-        return polkit.Result.YES;
+        !subject.isInGroup("wheel")) {
+        return polkit.Result.AUTH_ADMIN_KEEP;
     }
 });
 ```
