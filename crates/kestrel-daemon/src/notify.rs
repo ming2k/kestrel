@@ -1,13 +1,35 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
-//! Minimal `sd_notify(3)`: one datagram to `$NOTIFY_SOCKET`.
+//! Minimal `sd_notify(3)` and `sd_watchdog_enabled(3)` implementation.
 
 use std::ffi::OsStr;
 use std::os::unix::net::UnixDatagram;
+use std::time::Duration;
 
 pub(crate) fn notify(state: &str) {
     let socket = std::env::var_os("NOTIFY_SOCKET");
     notify_socket(socket.as_deref(), state);
+}
+
+/// Returns the systemd watchdog timeout when `WATCHDOG_USEC` is set for this
+/// process (matching `sd_watchdog_enabled(3)`), or `None` when disabled.
+pub(crate) fn watchdog_interval() -> Option<Duration> {
+    parse_watchdog(
+        std::env::var_os("WATCHDOG_USEC").as_deref(),
+        std::env::var_os("WATCHDOG_PID").as_deref(),
+        std::process::id(),
+    )
+}
+
+fn parse_watchdog(usec: Option<&OsStr>, pid: Option<&OsStr>, current_pid: u32) -> Option<Duration> {
+    if let Some(pid) = pid {
+        let parsed: u32 = pid.to_str()?.parse().ok()?;
+        if parsed != current_pid {
+            return None;
+        }
+    }
+    let micros: u64 = usec?.to_str()?.parse().ok()?;
+    (micros > 0).then(|| Duration::from_micros(micros))
 }
 
 fn notify_socket(socket: Option<&OsStr>, state: &str) {
@@ -48,5 +70,24 @@ mod tests {
         let mut buf = [0u8; 64];
         let len = receiver.recv(&mut buf).unwrap();
         assert_eq!(&buf[..len], b"READY=1\nSTATUS=running");
+    }
+
+    #[test]
+    fn parses_watchdog_interval_and_pid_guard() {
+        assert_eq!(parse_watchdog(None, None, 42), None);
+        assert_eq!(parse_watchdog(Some(OsStr::new("0")), None, 42), None);
+        assert_eq!(parse_watchdog(Some(OsStr::new("bogus")), None, 42), None);
+        assert_eq!(
+            parse_watchdog(Some(OsStr::new("30000000")), None, 42),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            parse_watchdog(Some(OsStr::new("30000000")), Some(OsStr::new("42")), 42),
+            Some(Duration::from_secs(30))
+        );
+        assert_eq!(
+            parse_watchdog(Some(OsStr::new("30000000")), Some(OsStr::new("99")), 42),
+            None
+        );
     }
 }

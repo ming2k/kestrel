@@ -10,6 +10,9 @@ TMPFILESDIR := $(DESTDIR)$(PREFIX)/lib/tmpfiles.d
 DBUS_POLICYDIR := $(DESTDIR)$(PREFIX)/share/dbus-1/system.d
 DBUS_SERVICEDIR := $(DESTDIR)$(PREFIX)/share/dbus-1/system-services
 POLKIT_DIR := $(DESTDIR)$(PREFIX)/share/polkit-1/actions
+BASH_COMPDIR := $(DESTDIR)$(PREFIX)/share/bash-completion/completions
+ZSH_COMPDIR := $(DESTDIR)$(PREFIX)/share/zsh/site-functions
+FISH_COMPDIR := $(DESTDIR)$(PREFIX)/share/fish/vendor_completions.d
 DOCDIR := $(DESTDIR)$(PREFIX)/share/doc/kestrel
 SYSCONFDIR := $(DESTDIR)/etc/kestrel
 
@@ -52,6 +55,13 @@ install: build
 	install -Dm644 data/com.hihusky.Kestrel.service $(DBUS_SERVICEDIR)/com.hihusky.Kestrel.service
 	install -Dm644 data/com.hihusky.kestrel.policy $(POLKIT_DIR)/com.hihusky.kestrel.policy
 	install -Dm644 config.example.toml $(SYSCONFDIR)/kestrel.toml.example
+	install -d $(BASH_COMPDIR) $(ZSH_COMPDIR) $(FISH_COMPDIR)
+	$(TARGET_DIR)/release/kestrel completions bash > $(BASH_COMPDIR)/kestrel
+	chmod 644 $(BASH_COMPDIR)/kestrel
+	$(TARGET_DIR)/release/kestrel completions zsh > $(ZSH_COMPDIR)/_kestrel
+	chmod 644 $(ZSH_COMPDIR)/_kestrel
+	$(TARGET_DIR)/release/kestrel completions fish > $(FISH_COMPDIR)/kestrel.fish
+	chmod 644 $(FISH_COMPDIR)/kestrel.fish
 	install -Dm644 LICENSE $(DOCDIR)/LICENSE
 	install -Dm644 README.md $(DOCDIR)/README.md
 	install -Dm644 ARCHITECTURE.md $(DOCDIR)/ARCHITECTURE.md
@@ -67,6 +77,9 @@ uninstall:
 	rm -f $(DBUS_POLICYDIR)/com.hihusky.Kestrel.conf
 	rm -f $(DBUS_SERVICEDIR)/com.hihusky.Kestrel.service
 	rm -f $(POLKIT_DIR)/com.hihusky.kestrel.policy
+	rm -f $(BASH_COMPDIR)/kestrel
+	rm -f $(ZSH_COMPDIR)/_kestrel
+	rm -f $(FISH_COMPDIR)/kestrel.fish
 	rm -f $(SYSCONFDIR)/kestrel.toml.example
 	rm -rf $(DOCDIR)
 

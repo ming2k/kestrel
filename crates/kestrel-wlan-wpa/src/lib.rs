@@ -441,6 +441,7 @@ impl WpaSupplicant {
         let (removed, stopped_ap) = {
             let mut state = self.lock();
             let removed = state.interfaces.remove(path);
+            state.known_groups.remove(path);
             let mut stopped_ap = None;
             if let Some(iface) = &removed {
                 state.links.remove(&iface.ifname);
@@ -660,14 +661,16 @@ impl WpaSupplicant {
 
     /// Reads the current scan results of a station.
     pub(crate) async fn scan_results(&self, path: &OwnedObjectPath) -> PortResult<Vec<Bss>> {
+        use futures_util::StreamExt;
+
         let proxy = self.proxy(path.as_str(), INTERFACE).await?;
         let paths: Vec<OwnedObjectPath> = proxy.get_property("BSSs").await.map_err(dbus_error)?;
-        let mut results = Vec::with_capacity(paths.len());
-        for bss in paths {
-            if let Some(bss) = self.read_bss(&bss).await {
-                results.push(bss);
-            }
-        }
+        let mut results: Vec<Bss> = futures_util::stream::iter(paths)
+            .map(|bss| async move { self.read_bss(&bss).await })
+            .buffer_unordered(16)
+            .filter_map(|item| async move { item })
+            .collect()
+            .await;
         results.sort_by(|a, b| b.signal.cmp(&a.signal).then_with(|| a.ssid.cmp(&b.ssid)));
         Ok(results)
     }

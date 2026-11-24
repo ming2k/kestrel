@@ -25,9 +25,10 @@ to drive them: a desktop shell, a settings panel, a casting service, a CLI.
   store, private keys are sealed with `systemd-creds`, and
   `wpa_supplicant` receives them as in-memory blobs.
 
-Status: **v0.0.3.** Station, P2P, SoftAP, and 802.1X paths are implemented
-and tested end to end against the real systemd-networkd. Real-radio
-validation is the open gate: see
+Status: **v0.0.4.** Station, P2P, SoftAP, and 802.1X paths are implemented,
+supervised for production deployment (`WatchdogSec=30s`, fail-fast bus fault
+recovery, bounded signal monitors), and tested end to end against the real
+systemd-networkd. Real-radio validation is the open gate: see
 [docs/hardware-validation.md](docs/hardware-validation.md).
 
 ## Layout
@@ -113,46 +114,48 @@ sandbox.
 
 ```sh
 kestrel status
-kestrel wifi status wlp0s20f3
-kestrel wifi scan wlp0s20f3
+kestrel status wlp0s20f3               # detailed view for one device (supports -w/--watch)
+kestrel wifi scan                      # auto-selects the unique wireless device (or -d <iface>)
 
-# Join a network: scan, infer security, prompt for the passphrase,
-# create or update the profile, connect, and wait for an address.
-kestrel wifi join wlp0s20f3 home
+# Connect to a saved profile or join a new SSID: scans, infers security, prompts
+# for the passphrase, saves/updates the profile, connects, and waits for an IP.
+kestrel wifi connect home
 
-# Later, connect to a saved profile (id, name, or SSID).
-kestrel wifi connect wlp0s20f3 home
-
-# Autoconnect state and recent history.
-kestrel wifi autoconnect wlp0s20f3 off
-kestrel wifi autoconnect wlp0s20f3 on
+# Autoconnect state, radio toggle, and station connection history.
+kestrel wifi autoconnect off
+kestrel wifi autoconnect on
 kestrel wifi history
-kestrel wifi forget home
+kestrel radio off
+kestrel radio on
+kestrel profile delete home
 
 kestrel agent                          # answer prompts in this terminal
-kestrel p2p find wlp0s20f3
-kestrel p2p connect wlp0s20f3 02:11:22:33:44:55 --go-intent 15 --wait
-kestrel p2p start-group wlp0s20f3 --frequency 2412 --wait   # autonomous GO
-kestrel p2p connect wlp0s20f3 02:11:22:33:44:55 --persistent --wait
-kestrel p2p groups list                # saved groups, reconnect without WPS
-kestrel p2p reconnect wlp0s20f3 <group> --peer 02:11:22:33:44:55 --wait
-kestrel p2p sessions
+kestrel p2p peer find
+kestrel p2p connect 02:11:22:33:44:55 --go-intent 15
+kestrel p2p start-group -f 2412        # autonomous GO (waits for ready by default)
+kestrel p2p connect 02:11:22:33:44:55 --persistent
+kestrel p2p group list                 # saved groups, reconnect without WPS
+kestrel p2p reconnect <group> --peer 02:11:22:33:44:55
+kestrel p2p session list
 
-kestrel hotspot start wlp0s20f3 --ssid kestrel-ap   # SoftAP; station hands over
-kestrel hotspot status wlp0s20f3
-kestrel hotspot stop wlp0s20f3
+kestrel hotspot start kestrel-ap       # SoftAP; station hands over (waits until active)
+kestrel hotspot status
+kestrel hotspot stop
 
-kestrel certificate add ./corp-ca.pem --name "Corp CA"   # 802.1X CA material
+kestrel certificate add ./corp-ca.pem --name "Corp CA"   # alias: `kestrel cert`
 kestrel certificate list
+kestrel completions zsh                # bash | zsh | fish | elvish | powershell
 ```
 
-`wlp0s20f3` is this host's interface; Kestrel discovers device names from the
-backend, so replace it with yours (`iw dev`, `networkctl list`). An
-autonomous group arms WPS push-button for one client; close it and start a
-new group for another.
+Single-device commands auto-select the unique capable wireless interface; on
+multi-radio hosts pass `-d <iface>` (or set `KESTREL_DEVICE`). An autonomous
+P2P group arms WPS push-button for one client; close it and start a new group
+for another.
 
-`wifi join` waits for `connected` by default; add `--no-wait` for scripts.
-`--json` is supported across `status`, `monitor` (NDJSON), `wifi`,
+State-transition commands (`wifi connect`, `wifi disconnect`, `hotspot start`,
+`hotspot stop`, `p2p connect`, `p2p start-group`, `p2p reconnect`) wait for
+the terminal state by default; pass `--no-wait` for asynchronous scripts.
+`--json` is supported across `status`, `radio`, `monitor` (NDJSON), `wifi`,
 `profile`, `certificate`, `p2p`, and `hotspot` subcommands. Secrets and WPS
 PINs are read from a no-echo prompt or from stdin (`--secret-stdin`,
 `--pin-stdin`, `--private-key-password-stdin`), never from argv.

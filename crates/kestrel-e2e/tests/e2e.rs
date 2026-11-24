@@ -67,7 +67,7 @@ fn device_state(lab: &Lab, device: &str) -> String {
 }
 
 fn sessions(lab: &Lab) -> Vec<Value> {
-    ctl(lab, &["p2p", "sessions"], None)
+    ctl(lab, &["p2p", "session", "list"], None)
         .ok()
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default()
@@ -122,7 +122,6 @@ impl Setup {
             &[
                 "profile",
                 "add",
-                "--ssid",
                 "lab-home",
                 "--security",
                 "wpa-personal",
@@ -194,10 +193,8 @@ fn station_gets_its_address_from_networkd_and_releases_it() {
         );
     }
 
-    ctl(lab, &["wifi", "disconnect", "wlan0"], None).unwrap();
-    wait_for("idle", Duration::from_secs(10), || {
-        device_state(lab, "wlan0") == "idle"
-    });
+    ctl(lab, &["wifi", "disconnect"], None).unwrap();
+    assert_eq!(device_state(lab, "wlan0"), "idle");
     wait_for("unit removed", Duration::from_secs(10), || {
         lab.kestrel_units().is_empty()
     });
@@ -210,28 +207,20 @@ fn station_gets_its_address_from_networkd_and_releases_it() {
 }
 
 #[test]
-fn join_status_history_and_autoconnect_work() {
+fn connect_status_history_and_autoconnect_work() {
     let Some(setup) = Setup::start() else { return };
     let lab = &setup.lab;
-    let joined = ctl(
+    let connected = ctl(
         lab,
-        &[
-            "wifi",
-            "join",
-            "wlan0",
-            "lab-home",
-            "--secret-stdin",
-            "--timeout",
-            "30",
-        ],
+        &["wifi", "connect", "lab-home", "--secret-stdin", "-t", "30"],
         Some("correct horse battery\n"),
     )
     .unwrap();
-    assert_eq!(joined["state"], "connected");
-    assert_eq!(joined["ssid"], "lab-home");
+    assert_eq!(connected["state"], "connected");
+    assert_eq!(connected["ssid"], "lab-home");
 
-    wait_for("address after join", Duration::from_secs(10), || {
-        ctl(lab, &["wifi", "status", "wlan0"], None)
+    wait_for("address after connect", Duration::from_secs(10), || {
+        ctl(lab, &["status", "wlan0"], None)
             .ok()
             .and_then(|status| {
                 status["addresses"]
@@ -240,7 +229,7 @@ fn join_status_history_and_autoconnect_work() {
             })
             .unwrap_or(false)
     });
-    let status = ctl(lab, &["wifi", "status", "wlan0"], None).unwrap();
+    let status = ctl(lab, &["status", "wlan0"], None).unwrap();
     assert_eq!(status["ssid"], "lab-home");
     assert_eq!(status["state"], "connected");
     assert_eq!(status["frequency"], 2412);
@@ -248,7 +237,7 @@ fn join_status_history_and_autoconnect_work() {
     assert_eq!(status["online_state"], "online");
     assert_eq!(status["dns"], serde_json::json!(["10.77.0.1"]));
 
-    let scan = ctl(lab, &["wifi", "list", "wlan0"], None).unwrap();
+    let scan = ctl(lab, &["wifi", "scan", "--cached"], None).unwrap();
     assert_eq!(scan[0]["ssid"], "lab-home");
     assert_eq!(scan[0]["known"], true);
     assert_eq!(scan[0]["profile"], status["profile"]);
@@ -263,7 +252,7 @@ fn join_status_history_and_autoconnect_work() {
     );
 
     wait_for("history entry", Duration::from_secs(10), || {
-        ctl(lab, &["wifi", "history", "--limit", "10"], None)
+        ctl(lab, &["wifi", "history", "-n", "10"], None)
             .ok()
             .and_then(|history| {
                 history.as_array().map(|events| {
@@ -275,16 +264,16 @@ fn join_status_history_and_autoconnect_work() {
             .unwrap_or(false)
     });
 
-    ctl(lab, &["wifi", "autoconnect", "wlan0", "off"], None).unwrap();
-    let status = ctl(lab, &["wifi", "status", "wlan0"], None).unwrap();
+    ctl(lab, &["wifi", "autoconnect", "off"], None).unwrap();
+    let status = ctl(lab, &["status", "wlan0"], None).unwrap();
     assert_eq!(status["state"], "connected");
     assert_eq!(status["autoconnect_enabled"], false);
-    ctl(lab, &["wifi", "autoconnect", "wlan0", "on"], None).unwrap();
-    let status = ctl(lab, &["wifi", "status", "wlan0"], None).unwrap();
+    ctl(lab, &["wifi", "autoconnect", "on"], None).unwrap();
+    let status = ctl(lab, &["status", "wlan0"], None).unwrap();
     assert_eq!(status["autoconnect_enabled"], true);
 
-    ctl(lab, &["wifi", "forget", "lab-home", "--yes"], None).unwrap();
-    wait_for("idle after forget", Duration::from_secs(10), || {
+    ctl(lab, &["profile", "delete", "lab-home", "-y"], None).unwrap();
+    wait_for("idle after delete", Duration::from_secs(10), || {
         device_state(lab, "wlan0") == "idle"
     });
 }
@@ -300,8 +289,13 @@ fn p2p_group_owner_serves_dhcp_through_networkd() {
         "DHCP=ipv4\nLinkLocalAddressing=no\nIPv6AcceptRA=no\n",
     );
 
-    let session = ctl(lab, &["p2p", "connect", "wlan0", "02:00:00:00:aa:42"], None).unwrap();
-    let session = session["session"].as_str().unwrap().to_owned();
+    let session = ctl(
+        lab,
+        &["p2p", "connect", "02:00:00:00:aa:42", "--no-wait"],
+        None,
+    )
+    .unwrap();
+    let session_id = session["id"].as_str().unwrap().to_owned();
     wait_for("connect issued", Duration::from_secs(10), || {
         fake_calls(lab)
             .iter()
@@ -329,7 +323,7 @@ fn p2p_group_owner_serves_dhcp_through_networkd() {
         "the reported peer address must be the lease networkd handed out"
     );
 
-    ctl(lab, &["p2p", "close", &session], None).unwrap();
+    ctl(lab, &["p2p", "session", "close", &session_id], None).unwrap();
     wait_for("group removed", Duration::from_secs(10), || {
         fake_calls(lab).contains(&"P2P.Disconnect p2p-wlan0-0".to_owned())
     });
@@ -353,11 +347,11 @@ fn autonomous_group_owner_serves_dhcp_through_networkd() {
 
     let session = ctl(
         lab,
-        &["p2p", "start-group", "wlan0", "--frequency", "2412"],
+        &["p2p", "start-group", "-f", "2412", "--no-wait"],
         None,
     )
     .unwrap();
-    let session = session["session"].as_str().unwrap().to_owned();
+    let session_id = session["id"].as_str().unwrap().to_owned();
     wait_for("group add issued", Duration::from_secs(10), || {
         fake_calls(lab)
             .iter()
@@ -390,7 +384,7 @@ fn autonomous_group_owner_serves_dhcp_through_networkd() {
         [format!("{}/24", ready["peer_ip"].as_str().unwrap())]
     );
 
-    ctl(lab, &["p2p", "close", &session], None).unwrap();
+    ctl(lab, &["p2p", "session", "close", &session_id], None).unwrap();
     wait_for("group removed", Duration::from_secs(10), || {
         fake_calls(lab).contains(&"P2P.Disconnect p2p-wlan0-0".to_owned())
     });
@@ -416,10 +410,10 @@ fn p2p_client_obtains_an_address_from_the_remote_group_owner() {
         &[
             "p2p",
             "connect",
-            "wlan0",
             "02:00:00:00:aa:43",
             "--go-intent",
             "0",
+            "--no-wait",
         ],
         None,
     )
@@ -454,33 +448,16 @@ fn hotspot_takes_the_radio_and_restores_the_station() {
     setup.add_home_profile();
     setup.wait_connected();
 
-    let starting = ctl(
+    let active = ctl(
         lab,
-        &[
-            "hotspot",
-            "start",
-            "wlan0",
-            "--ssid",
-            "lab-ap",
-            "--security",
-            "open",
-        ],
+        &["hotspot", "start", "lab-ap", "--security", "open"],
         None,
     )
     .unwrap();
-    assert_eq!(starting["state"], "starting");
-
-    wait_for("hotspot active", Duration::from_secs(30), || {
-        ctl(lab, &["hotspot", "status", "wlan0"], None)
-            .ok()
-            .and_then(|status| status[0]["state"].as_str().map(str::to_owned))
-            .as_deref()
-            == Some("active")
-    });
-    let status = ctl(lab, &["hotspot", "status", "wlan0"], None).unwrap();
-    assert_eq!(status[0]["ssid"], "lab-ap");
-    assert_eq!(status[0]["security"], "open");
-    assert_eq!(status[0]["gateway"], "192.168.49.1/24");
+    assert_eq!(active["state"], "active");
+    assert_eq!(active["ssid"], "lab-ap");
+    assert_eq!(active["security"], "open");
+    assert_eq!(active["gateway"], "192.168.49.1/24");
     assert_eq!(
         lab.ipv4("wlan0"),
         ["192.168.49.1/24"],
@@ -490,14 +467,9 @@ fn hotspot_takes_the_radio_and_restores_the_station() {
     assert_eq!(device_state(lab, "wlan0"), "disabled");
     assert_eq!(lab.kestrel_units(), ["10-kestrel-wlan0.network"]);
 
-    ctl(lab, &["hotspot", "stop", "wlan0"], None).unwrap();
-    wait_for("hotspot stopped", Duration::from_secs(30), || {
-        ctl(lab, &["hotspot", "status", "wlan0"], None)
-            .ok()
-            .and_then(|status| status[0]["state"].as_str().map(str::to_owned))
-            .as_deref()
-            == Some("stopped")
-    });
+    ctl(lab, &["hotspot", "stop"], None).unwrap();
+    let stopped = ctl(lab, &["hotspot", "status", "-d", "wlan0"], None).unwrap();
+    assert_eq!(stopped["state"], "stopped");
     // The station gets the radio back and autoconnects to its saved profile.
     setup.wait_connected();
     assert!(
@@ -516,7 +488,12 @@ fn crash_leftovers_are_swept_and_shutdown_leaves_nothing() {
     setup.wait_connected();
     let lab = &setup.lab;
     lab.veth("p2p-wlan0-0", "peer0");
-    ctl(lab, &["p2p", "connect", "wlan0", "02:00:00:00:aa:42"], None).unwrap();
+    ctl(
+        lab,
+        &["p2p", "connect", "02:00:00:00:aa:42", "--no-wait"],
+        None,
+    )
+    .unwrap();
     control(lab, "StartGroup", &("wlan0", "p2p-wlan0-0", true));
     wait_for("both bound", Duration::from_secs(30), || {
         lab.kestrel_units().len() == 2
@@ -586,9 +563,9 @@ fn crash_leftovers_are_swept_and_shutdown_leaves_nothing() {
     control(lab, "SetSleep", &(false,));
     setup.wait_connected();
 
-    // Persistent wireless off across daemon restart.
-    ctl(lab, &["wifi", "off"], None).unwrap();
-    wait_for("disabled on wifi off", Duration::from_secs(10), || {
+    // Persistent radio off across daemon restart.
+    ctl(lab, &["radio", "off"], None).unwrap();
+    wait_for("disabled on radio off", Duration::from_secs(10), || {
         device_state(lab, "wlan0") == "disabled"
     });
     setup.daemon.take().unwrap().terminate();
@@ -597,7 +574,7 @@ fn crash_leftovers_are_swept_and_shutdown_leaves_nothing() {
     let overview = ctl(lab, &["status"], None).unwrap();
     assert_eq!(overview["wireless_enabled"], false);
     assert_eq!(device_state(lab, "wlan0"), "disabled");
-    ctl(lab, &["wifi", "on"], None).unwrap();
+    ctl(lab, &["radio", "on"], None).unwrap();
     setup.wait_connected();
 
     // Graceful shutdown releases everything.
@@ -642,7 +619,6 @@ fn enterprise_8021x_imports_cert_uploads_blobs_and_binds_networkd() {
         &[
             "profile",
             "add",
-            "--ssid",
             "corp-eap",
             "--security",
             "wpa3-enterprise",
@@ -668,12 +644,8 @@ fn enterprise_8021x_imports_cert_uploads_blobs_and_binds_networkd() {
     });
     assert_eq!(blob_names(lab, "wlan0"), ["kestrel-ca"]);
 
-    ctl(lab, &["wifi", "disconnect", "wlan0"], None).unwrap();
-    wait_for(
-        "idle after enterprise disconnect",
-        Duration::from_secs(10),
-        || device_state(lab, "wlan0") == "idle",
-    );
+    ctl(lab, &["wifi", "disconnect"], None).unwrap();
+    assert_eq!(device_state(lab, "wlan0"), "idle");
     wait_for(
         "enterprise blobs removed after disconnect",
         Duration::from_secs(10),
@@ -697,12 +669,12 @@ fn persistent_p2p_group_reconnects_via_networkd() {
         ),
     );
     wait_for("persistent group saved", Duration::from_secs(10), || {
-        ctl(lab, &["p2p", "groups", "list"], None)
+        ctl(lab, &["p2p", "group", "list"], None)
             .ok()
             .and_then(|v| v.as_array().map(|a| !a.is_empty()))
             .unwrap_or(false)
     });
-    let groups = ctl(lab, &["p2p", "groups", "list"], None).unwrap();
+    let groups = ctl(lab, &["p2p", "group", "list"], None).unwrap();
     let group_id = groups[0]["id"].as_str().unwrap().to_owned();
 
     lab.veth("p2p-wlan0-0", "peer0");
@@ -710,8 +682,9 @@ fn persistent_p2p_group_reconnects_via_networkd() {
         "peer0",
         "IPv6AcceptRA=no\n[Network]\nDHCP=ipv4\n[DHCPv4]\nUseDNS=no\nUseRoutes=no\n",
     );
-    let session = ctl(lab, &["p2p", "reconnect", "wlan0", &group_id], None).unwrap();
-    let session_path = session["session"].as_str().unwrap().to_owned();
+    let session = ctl(lab, &["p2p", "reconnect", &group_id, "--no-wait"], None).unwrap();
+    let session_id = session["id"].as_str().unwrap().to_owned();
+    let session_path = session["path"].as_str().unwrap().to_owned();
     control(lab, "StartGroup", &("wlan0", "p2p-wlan0-0", true));
 
     wait_for(
@@ -731,7 +704,7 @@ fn persistent_p2p_group_reconnects_via_networkd() {
     );
     assert_eq!(lab.ipv4("p2p-wlan0-0"), ["192.168.49.1/24"]);
 
-    ctl(lab, &["p2p", "close", &session_path], None).unwrap();
+    ctl(lab, &["p2p", "session", "close", &session_id], None).unwrap();
     wait_for("persistent session gone", Duration::from_secs(10), || {
         sessions(lab).is_empty()
     });

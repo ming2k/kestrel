@@ -106,32 +106,32 @@ CTL="sudo $BIN/kestrel"
 echo "== profile"
 case "$SECURITY" in
     open|owe)
-        $CTL profile add --ssid "$SSID" --security "$SECURITY"
+        $CTL profile add "$SSID" --security "$SECURITY"
         ;;
     *)
-        printf '%s\n' "$KESTREL_HW_PSK" | $CTL profile add --ssid "$SSID" --security "$SECURITY" --secret-stdin
+        printf '%s\n' "$KESTREL_HW_PSK" | $CTL profile add "$SSID" --security "$SECURITY" --secret-stdin
         ;;
 esac
 
 echo "== waiting for connection (autoconnect)"
 for _ in $(seq 60); do
-    $CTL --json wifi status "$IFACE" | grep -q '"state": "connected"' && break
+    $CTL --json status "$IFACE" | grep -q '"state": "connected"' && break
     sleep 1
 done
 $CTL status | tee "$ARTIFACTS/status-connected.txt"
 networkctl status "$IFACE" --no-pager | tee "$ARTIFACTS/networkctl-connected.txt"
-$CTL --json wifi status "$IFACE" | grep -q '"state": "connected"' || { echo "FAIL: not connected" | tee "$ARTIFACTS/result.txt"; exit 1; }
+$CTL --json status "$IFACE" | grep -q '"state": "connected"' || { echo "FAIL: not connected" | tee "$ARTIFACTS/result.txt"; exit 1; }
 
 echo "== disconnect releases L3 and L2"
-$CTL wifi disconnect "$IFACE"
+$CTL wifi disconnect -d "$IFACE"
 sleep 3
 networkctl status "$IFACE" --no-pager | tee "$ARTIFACTS/networkctl-released.txt"
 ls /run/systemd/network/10-kestrel-"$IFACE".network 2>/dev/null && { echo "FAIL: unit not removed" | tee "$ARTIFACTS/result.txt"; exit 1; }
 
 echo "== reconnect, then a graceful stop must leave nothing"
-$CTL wifi connect "$IFACE" "$SSID"
-for _ in $(seq 60); do $CTL --json wifi status "$IFACE" | grep -q '"state": "connected"' && break; sleep 1; done
-$CTL --json wifi status "$IFACE" | grep -q '"state": "connected"' || { echo "FAIL: reconnect timed out" | tee "$ARTIFACTS/result.txt"; exit 1; }
+$CTL wifi connect "$SSID" -d "$IFACE"
+for _ in $(seq 60); do $CTL --json status "$IFACE" | grep -q '"state": "connected"' && break; sleep 1; done
+$CTL --json status "$IFACE" | grep -q '"state": "connected"' || { echo "FAIL: reconnect timed out" | tee "$ARTIFACTS/result.txt"; exit 1; }
 sudo kill -TERM "$DAEMON_PID"; wait "$DAEMON_PID" || true; DAEMON_PID=
 ls /run/systemd/network/10-kestrel-* >/dev/null 2>&1 && { echo "FAIL: units left after shutdown" | tee "$ARTIFACTS/result.txt"; exit 1; }
 echo "PASS" | tee "$ARTIFACTS/result.txt"

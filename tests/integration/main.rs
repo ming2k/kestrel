@@ -66,7 +66,8 @@ async fn cli_and_dbus_station_lifecycle_with_disk_stores() {
         .expect("text status");
     assert!(text_status.contains("wlan0"));
 
-    let scan = cli_json(&bus, &["wifi", "scan", "wlan0"], None)
+    // Implicit single-device resolution: no `-d wlan0` required.
+    let scan = cli_json(&bus, &["wifi", "scan"], None)
         .await
         .expect("wifi scan");
     assert_eq!(scan[0]["ssid"], "home");
@@ -74,21 +75,23 @@ async fn cli_and_dbus_station_lifecycle_with_disk_stores() {
 
     let joined = cli_json(
         &bus,
-        &[
-            "wifi",
-            "join",
-            "wlan0",
-            "home",
-            "--secret-stdin",
-            "--timeout",
-            "10",
-        ],
+        &["wifi", "connect", "home", "--secret-stdin", "-t", "10"],
         Some("super-secret\n"),
     )
     .await
-    .expect("wifi join");
+    .expect("wifi connect");
     assert_eq!(joined["state"], "connected");
     assert_eq!(joined["ssid"], "home");
+
+    // Human single-device status prints a friendly profile label, not a raw D-Bus path.
+    let detail_text = cli_text(&bus, &["status", "wlan0"], None)
+        .await
+        .expect("status wlan0");
+    assert!(detail_text.contains("Profile: home ("), "{detail_text}");
+    assert!(
+        !detail_text.contains("/com/hihusky/Kestrel/"),
+        "D-Bus path leaked in human output: {detail_text}"
+    );
 
     let profiles = cli_json(&bus, &["profile", "list"], None)
         .await
@@ -97,7 +100,7 @@ async fn cli_and_dbus_station_lifecycle_with_disk_stores() {
     assert_eq!(profiles[0]["ssid"], "home");
 
     wait_until("history recorded", Duration::from_secs(5), || async {
-        cli_json(&bus, &["wifi", "history", "--limit", "5"], None)
+        cli_json(&bus, &["wifi", "history", "-n", "5"], None)
             .await
             .ok()
             .and_then(|v| {
@@ -110,23 +113,64 @@ async fn cli_and_dbus_station_lifecycle_with_disk_stores() {
     })
     .await;
 
-    cli_json(&bus, &["wifi", "disconnect", "wlan0"], None)
+    // `wifi disconnect` waits until idle by default.
+    cli_json(&bus, &["wifi", "disconnect"], None)
         .await
         .expect("disconnect");
-    wait_until("idle after disconnect", Duration::from_secs(5), || async {
-        cli_json(&bus, &["wifi", "status", "wlan0"], None)
-            .await
-            .is_ok_and(|v| v["state"] == "idle")
-    })
-    .await;
-
-    cli_json(&bus, &["wifi", "forget", "home", "--yes"], None)
+    let dev_status = cli_json(&bus, &["status", "wlan0"], None)
         .await
-        .expect("forget");
+        .expect("status wlan0");
+    assert_eq!(dev_status["state"], "idle");
+
+    // Autoconnect query works without mutating state.
+    let auto = cli_json(&bus, &["wifi", "autoconnect"], None)
+        .await
+        .expect("autoconnect query");
+    assert_eq!(auto["held"], true);
+
+    cli_json(&bus, &["profile", "delete", "home", "-y"], None)
+        .await
+        .expect("profile delete");
     let profiles_after = cli_json(&bus, &["profile", "list"], None)
         .await
-        .expect("profile list after forget");
+        .expect("profile list after delete");
     assert_eq!(profiles_after.as_array().expect("array").len(), 0);
+
+    env.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn multi_device_requires_explicit_device_flag() {
+    let mut env = TestEnv::start_memory().await;
+    env.wlan.add_device("wlan1");
+    let bus = env.bus.address().to_owned();
+
+    wait_until(
+        "second device registered",
+        Duration::from_secs(5),
+        || async {
+            cli_json(&bus, &["status"], None)
+                .await
+                .ok()
+                .and_then(|v| v["devices"].as_array().map(Vec::len))
+                == Some(2)
+        },
+    )
+    .await;
+
+    // Omitting `-d` when two devices exist must fail clearly instead of guessing.
+    let err = cli_json(&bus, &["wifi", "scan", "--cached"], None)
+        .await
+        .unwrap_err();
+    assert!(
+        err.contains("wlan0") && err.contains("wlan1") && err.contains("-d/--device"),
+        "unexpected ambiguity error: {err}"
+    );
+
+    // Explicit `-d wlan1` succeeds cleanly.
+    cli_json(&bus, &["wifi", "scan", "--cached", "-d", "wlan1"], None)
+        .await
+        .expect("explicit device scan");
 
     env.shutdown().await;
 }
@@ -184,22 +228,14 @@ async fn disk_persistence_survives_runtime_restart() {
 
         cli_json(
             bus.address(),
-            &[
-                "wifi",
-                "join",
-                "wlan0",
-                "office",
-                "--secret-stdin",
-                "--timeout",
-                "10",
-            ],
+            &["wifi", "connect", "office", "--secret-stdin", "-t", "10"],
             Some("office-pass\n"),
         )
         .await
-        .expect("join");
-        cli_json(bus.address(), &["wifi", "off"], None)
+        .expect("connect");
+        cli_json(bus.address(), &["radio", "off"], None)
             .await
-            .expect("wifi off");
+            .expect("radio off");
 
         server.stop().await;
         controller.shutdown().await;
@@ -243,6 +279,11 @@ async fn disk_persistence_survives_runtime_restart() {
         .await
         .expect("server 2");
 
+        let radio = cli_json(bus.address(), &["radio"], None)
+            .await
+            .expect("radio query");
+        assert_eq!(radio["wireless_enabled"], false);
+
         let status = cli_json(bus.address(), &["status"], None)
             .await
             .expect("status");
@@ -254,7 +295,7 @@ async fn disk_persistence_survives_runtime_restart() {
             .expect("profiles");
         assert_eq!(profiles[0]["ssid"], "office");
 
-        let history = cli_json(bus.address(), &["wifi", "history", "--limit", "5"], None)
+        let history = cli_json(bus.address(), &["wifi", "history", "-n", "5"], None)
             .await
             .expect("history");
         assert!(
@@ -284,14 +325,7 @@ async fn authorizer_enforces_permissions_across_dbus_and_cli() {
     // Profile modification is denied with AccessDenied.
     let err = cli_json(
         &bus,
-        &[
-            "profile",
-            "add",
-            "--ssid",
-            "restricted",
-            "--security",
-            "open",
-        ],
+        &["profile", "add", "restricted", "--security", "open"],
         None,
     )
     .await
@@ -305,21 +339,19 @@ async fn authorizer_enforces_permissions_across_dbus_and_cli() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn cli_p2p_session_connect_and_close() {
+async fn cli_p2p_session_connect_show_and_close() {
     let mut env = TestEnv::start_memory().await;
     let bus = env.bus.address().to_owned();
 
     let created = cli_json(
         &bus,
-        &["p2p", "connect", "wlan0", "02:00:00:00:aa:11"],
+        &["p2p", "connect", "02:00:00:00:aa:11", "--no-wait"],
         None,
     )
     .await
-    .expect("p2p connect");
-    let session_path = created["session"]
-        .as_str()
-        .expect("session path")
-        .to_owned();
+    .expect("p2p connect --no-wait");
+    let session_id = created["id"].as_str().expect("session id").to_owned();
+    let session_path = created["path"].as_str().expect("session path").to_owned();
 
     let group_if = InterfaceName::new("p2p-wlan0-0").expect("iface");
     let wlan_iface = InterfaceName::new("wlan0").expect("iface");
@@ -330,7 +362,7 @@ async fn cli_p2p_session_connect_and_close() {
     });
 
     wait_until("session ready", Duration::from_secs(5), || async {
-        cli_json(&bus, &["p2p", "sessions"], None)
+        cli_json(&bus, &["p2p", "session", "list"], None)
             .await
             .ok()
             .and_then(|v| {
@@ -343,12 +375,19 @@ async fn cli_p2p_session_connect_and_close() {
     })
     .await;
 
-    cli_json(&bus, &["p2p", "close", &session_path], None)
+    let shown = cli_json(&bus, &["p2p", "session", "show", &session_id], None)
         .await
-        .expect("p2p close");
+        .expect("p2p session show");
+    assert_eq!(shown["id"], session_id);
+    assert_eq!(shown["device"], "wlan0");
+    assert_eq!(shown["state"], "ready");
+
+    cli_json(&bus, &["p2p", "session", "close", &session_id], None)
+        .await
+        .expect("p2p session close");
 
     wait_until("session closed", Duration::from_secs(5), || async {
-        cli_json(&bus, &["p2p", "sessions"], None)
+        cli_json(&bus, &["p2p", "session", "list"], None)
             .await
             .ok()
             .and_then(|v| v.as_array().map(Vec::is_empty))
@@ -498,75 +537,49 @@ async fn cli_hotspot_lifecycle_and_certificate_store() {
     );
 
     // Status of an idle hotspot is readable before anything starts.
-    let idle = cli_json(&bus, &["hotspot", "status", "wlan0"], None)
+    let idle = cli_json(&bus, &["hotspot", "status", "-d", "wlan0"], None)
         .await
         .expect("hotspot status");
-    assert_eq!(idle[0]["state"], "stopped");
+    assert_eq!(idle["state"], "stopped");
 
-    cli_json(
+    // `hotspot start` waits until active by default and returns full status.
+    let active = cli_json(
         &bus,
-        &[
-            "hotspot",
-            "start",
-            "wlan0",
-            "--ssid",
-            "lab-ap",
-            "--secret-stdin",
-        ],
+        &["hotspot", "start", "lab-ap", "--secret-stdin"],
         Some("hotspot-pass\n"),
     )
     .await
     .expect("hotspot start");
-    wait_until("hotspot active", Duration::from_secs(5), || async {
-        cli_json(&bus, &["hotspot", "status", "wlan0"], None)
-            .await
-            .is_ok_and(|v| v[0]["state"] == "active")
-    })
-    .await;
-    let active = cli_json(&bus, &["hotspot", "status", "wlan0"], None)
-        .await
-        .expect("hotspot status");
-    assert_eq!(active[0]["ssid"], "lab-ap");
-    assert_eq!(active[0]["security"], "wpa-personal");
+    assert_eq!(active["state"], "active");
+    assert_eq!(active["ssid"], "lab-ap");
+    assert_eq!(active["security"], "wpa-personal");
     assert!(
-        active[0]["gateway"]
-            .as_str()
-            .is_some_and(|g| g.contains('/')),
+        active["gateway"].as_str().is_some_and(|g| g.contains('/')),
         "the hotspot serves a subnet: {active:?}"
     );
 
-    cli_json(&bus, &["hotspot", "stop", "wlan0"], None)
+    // `hotspot stop` waits until stopped by default.
+    cli_json(&bus, &["hotspot", "stop"], None)
         .await
         .expect("hotspot stop");
-    wait_until("hotspot stopped", Duration::from_secs(5), || async {
-        cli_json(&bus, &["hotspot", "status", "wlan0"], None)
-            .await
-            .is_ok_and(|v| v[0]["state"] == "stopped")
-    })
-    .await;
+    let stopped = cli_json(&bus, &["hotspot", "status", "-d", "wlan0"], None)
+        .await
+        .expect("hotspot status");
+    assert_eq!(stopped["state"], "stopped");
 
-    // Certificates: import, list, reference, and delete.
+    // Certificates: import via `cert` alias with derived name, list, reference, and delete.
     let dir = tempfile::tempdir().expect("tempdir");
-    let pem = dir.path().join("ca.pem");
+    let pem = dir.path().join("Lab CA.pem");
     std::fs::write(
         &pem,
         "-----BEGIN CERTIFICATE-----\nMAowAwIBAQMDAAEC\n-----END CERTIFICATE-----\n",
     )
     .expect("write pem");
-    let added = cli_json(
-        &bus,
-        &[
-            "certificate",
-            "add",
-            pem.to_str().expect("utf8"),
-            "--name",
-            "Lab CA",
-        ],
-        None,
-    )
-    .await
-    .expect("certificate add");
+    let added = cli_json(&bus, &["cert", "add", pem.to_str().expect("utf8")], None)
+        .await
+        .expect("cert add");
     let cert_id = added["id"].as_str().expect("id").to_owned();
+    assert_eq!(added["name"], "Lab CA");
 
     let listed = cli_json(&bus, &["certificate", "list"], None)
         .await
@@ -585,7 +598,6 @@ async fn cli_hotspot_lifecycle_and_certificate_store() {
         &[
             "profile",
             "add",
-            "--ssid",
             "corp",
             "--security",
             "wpa-enterprise",
@@ -618,15 +630,15 @@ async fn cli_hotspot_lifecycle_and_certificate_store() {
     assert_eq!(shown["has_secret"], true);
 
     // Deleting the certificate is refused while the profile references it.
-    let err = cli_json(&bus, &["certificate", "delete", &cert_id, "--yes"], None)
+    let err = cli_json(&bus, &["certificate", "delete", &cert_id, "-y"], None)
         .await
         .unwrap_err();
     assert!(err.contains("Busy") || err.contains("busy"), "{err}");
-    cli_json(&bus, &["profile", "delete", &profile_id, "--yes"], None)
+    cli_json(&bus, &["profile", "delete", &profile_id, "-y"], None)
         .await
         .expect("profile delete");
 
-    cli_json(&bus, &["certificate", "delete", &cert_id, "--yes"], None)
+    cli_json(&bus, &["certificate", "delete", &cert_id, "-y"], None)
         .await
         .expect("certificate delete");
     let empty = cli_json(&bus, &["certificate", "list"], None)
@@ -648,11 +660,11 @@ async fn p2p_persistent_groups_via_the_cli() {
         &[
             "p2p",
             "connect",
-            "wlan0",
             "02:00:00:00:aa:55",
             "--go-intent",
             "15",
             "--persistent",
+            "--no-wait",
         ],
         None,
     )
@@ -667,20 +679,20 @@ async fn p2p_persistent_groups_via_the_cli() {
     });
 
     wait_until("group saved", Duration::from_secs(5), || async {
-        cli_json(&bus, &["p2p", "groups", "list"], None)
+        cli_json(&bus, &["p2p", "group", "list"], None)
             .await
             .is_ok_and(|v| !v.as_array().expect("array").is_empty())
     })
     .await;
-    let groups = cli_json(&bus, &["p2p", "groups", "list"], None)
+    let groups = cli_json(&bus, &["p2p", "group", "list"], None)
         .await
-        .expect("groups list");
+        .expect("group list");
     let group_id = groups[0]["id"].as_str().expect("id").to_owned();
     assert_eq!(groups[0]["ssid"], "DIRECT-lab");
 
-    let shown = cli_json(&bus, &["p2p", "groups", "show", &group_id], None)
+    let shown = cli_json(&bus, &["p2p", "group", "show", &group_id], None)
         .await
-        .expect("groups show");
+        .expect("group show");
     assert_eq!(shown["role"], "group-owner");
 
     let sessions_before = env
@@ -690,7 +702,7 @@ async fn p2p_persistent_groups_via_the_cli() {
         .filter(|c| matches!(c, kestrel_testkit::WlanCall::P2pConnectPersistent { .. }))
         .count();
     // The connect above still holds the device; only one session at a time.
-    for session in cli_json(&bus, &["p2p", "sessions"], None)
+    for session in cli_json(&bus, &["p2p", "session", "list"], None)
         .await
         .expect("sessions")
         .as_array()
@@ -699,14 +711,19 @@ async fn p2p_persistent_groups_via_the_cli() {
     {
         cli_json(
             &bus,
-            &["p2p", "close", session["path"].as_str().expect("path")],
+            &[
+                "p2p",
+                "session",
+                "close",
+                session["id"].as_str().expect("id"),
+            ],
             None,
         )
         .await
-        .expect("p2p close");
+        .expect("p2p session close");
     }
     wait_until("first session closed", Duration::from_secs(5), || async {
-        cli_json(&bus, &["p2p", "sessions"], None)
+        cli_json(&bus, &["p2p", "session", "list"], None)
             .await
             .is_ok_and(|v| v.as_array().is_some_and(Vec::is_empty))
     })
@@ -717,10 +734,10 @@ async fn p2p_persistent_groups_via_the_cli() {
         &[
             "p2p",
             "reconnect",
-            "wlan0",
             &group_id,
             "--peer",
             "02:00:00:00:aa:56",
+            "--no-wait",
         ],
         None,
     )
@@ -734,7 +751,7 @@ async fn p2p_persistent_groups_via_the_cli() {
         .count();
     assert_eq!(sessions_after, sessions_before + 1, "WPS is skipped");
 
-    for session in cli_json(&bus, &["p2p", "sessions"], None)
+    for session in cli_json(&bus, &["p2p", "session", "list"], None)
         .await
         .expect("sessions")
         .as_array()
@@ -743,25 +760,30 @@ async fn p2p_persistent_groups_via_the_cli() {
     {
         cli_json(
             &bus,
-            &["p2p", "close", session["path"].as_str().expect("path")],
+            &[
+                "p2p",
+                "session",
+                "close",
+                session["id"].as_str().expect("id"),
+            ],
             None,
         )
         .await
-        .expect("p2p close");
+        .expect("p2p session close");
     }
     wait_until("sessions closed", Duration::from_secs(5), || async {
-        cli_json(&bus, &["p2p", "sessions"], None)
+        cli_json(&bus, &["p2p", "session", "list"], None)
             .await
             .is_ok_and(|v| v.as_array().is_some_and(Vec::is_empty))
     })
     .await;
 
-    cli_json(&bus, &["p2p", "groups", "delete", &group_id, "--yes"], None)
+    cli_json(&bus, &["p2p", "group", "delete", &group_id, "-y"], None)
         .await
-        .expect("groups delete");
-    let empty = cli_json(&bus, &["p2p", "groups", "list"], None)
+        .expect("group delete");
+    let empty = cli_json(&bus, &["p2p", "group", "list"], None)
         .await
-        .expect("groups list after delete");
+        .expect("group list after delete");
     assert_eq!(empty.as_array().expect("array").len(), 0);
 
     env.shutdown().await;

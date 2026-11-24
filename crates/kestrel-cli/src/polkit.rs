@@ -43,58 +43,61 @@ impl Drop for PolkitGuard {
     }
 }
 
-/// Ensures the current system-bus connection is authorized for every polkit
-/// action in `actions`, returning `AccessDenied` immediately if not.
-///
-/// On non-system buses (`session` or private test buses), or when polkitd is
-/// not present on the bus, this is a no-op and authorization is left to the
-/// daemon.
-pub(crate) async fn ensure_authorized(
-    connection: &zbus::Connection,
-    bus: &str,
-    actions: &[&str],
-) -> zbus::Result<PolkitGuard> {
-    let mut guard = PolkitGuard::default();
-    if bus != "system" || actions.is_empty() {
-        return Ok(guard);
-    }
-    let Some(unique_name) = connection.unique_name() else {
-        return Ok(guard);
-    };
-    let sender = unique_name.as_str().to_owned();
-    let Ok(proxy): zbus::Result<zbus::Proxy<'_>> = zbus::proxy::Builder::new(connection)
-        .destination(POLKIT_SERVICE)
-        .path(POLKIT_PATH)
-        .interface(POLKIT_INTERFACE)
-        .cache_properties(zbus::proxy::CacheProperties::No)
-        .build()
-        .await
-    else {
-        return Ok(guard);
-    };
-
-    for &action in actions {
-        let Ok((authorized, challenge)) = check(&proxy, &sender, action, 0).await else {
-            // If polkitd is unavailable (e.g. bus-policy mode), let the daemon decide.
-            return Ok(guard);
+impl PolkitGuard {
+    /// Ensures the current system-bus connection is authorized for every polkit
+    /// action in `actions`, reusing any already-running fallback `pkttyagent`
+    /// held by this guard.
+    ///
+    /// On non-system buses (`session` or private test buses), or when polkitd is
+    /// not present on the bus, this is a no-op and authorization is left to the
+    /// daemon.
+    pub(crate) async fn ensure_authorized(
+        &mut self,
+        connection: &zbus::Connection,
+        bus: &str,
+        actions: &[&str],
+    ) -> zbus::Result<()> {
+        if bus != "system" || actions.is_empty() {
+            return Ok(());
+        }
+        let Some(unique_name) = connection.unique_name() else {
+            return Ok(());
         };
-        if authorized {
-            continue;
-        }
-        if !challenge {
-            return Err(access_denied(action));
-        }
-        if guard.agent.is_none() && std::io::stdin().is_terminal() {
-            guard.agent = spawn_tty_agent(&sender).await;
-        }
-        let (interactive_ok, _) = check(&proxy, &sender, action, 1)
+        let sender = unique_name.as_str().to_owned();
+        let Ok(proxy): zbus::Result<zbus::Proxy<'_>> = zbus::proxy::Builder::new(connection)
+            .destination(POLKIT_SERVICE)
+            .path(POLKIT_PATH)
+            .interface(POLKIT_INTERFACE)
+            .cache_properties(zbus::proxy::CacheProperties::No)
+            .build()
             .await
-            .map_err(|_| access_denied(action))?;
-        if !interactive_ok {
-            return Err(access_denied(action));
+        else {
+            return Ok(());
+        };
+
+        for &action in actions {
+            let Ok((authorized, challenge)) = check(&proxy, &sender, action, 0).await else {
+                // If polkitd is unavailable (e.g. bus-policy mode), let the daemon decide.
+                return Ok(());
+            };
+            if authorized {
+                continue;
+            }
+            if !challenge {
+                return Err(access_denied(action));
+            }
+            if self.agent.is_none() && std::io::stdin().is_terminal() {
+                self.agent = spawn_tty_agent(&sender).await;
+            }
+            let (interactive_ok, _) = check(&proxy, &sender, action, 1)
+                .await
+                .map_err(|_| access_denied(action))?;
+            if !interactive_ok {
+                return Err(access_denied(action));
+            }
         }
+        Ok(())
     }
-    Ok(guard)
 }
 
 async fn check(

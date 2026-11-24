@@ -214,7 +214,11 @@ builds the D-Bus object server for `kestrel-daemon`. See
 `data/` holds the deployable surface, and `scripts/check-system-files.sh`
 verifies each file against the real tools:
 
-- `kestrel.service`: `Type=notify` (READY after the bus name is owned).
+- `kestrel.service`: `Type=notify` (`READY=1` after the bus name is owned)
+  with an active-liveness `WatchdogSec=30s` probing both `RadioCoordinator` and
+  D-Bus responsiveness before sending `WATCHDOG=1`, plus fail-fast exit on
+  unexpected bus/name/sync loss for `Restart=on-failure` recovery
+  ([ADR-0011](docs/adr/0011-daemon-supervision-liveness-watchdog-and-bounded-monitors.md)).
   Runs as root with an empty capability set, `ProtectSystem=strict` (writable:
   `/var/lib/kestrel`, `/run/systemd/network`), AF_UNIX only, a closed device
   policy except the TPM, and the `@system-service` syscall set minus

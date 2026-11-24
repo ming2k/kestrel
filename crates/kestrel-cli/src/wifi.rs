@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: LGPL-2.1-or-later
 
-//! `kestrel status` and `kestrel wifi`: station status, scanning, and connections.
+//! `kestrel wifi`: station scanning, connection management, autoconnect, and history.
 
 use std::collections::HashMap;
-use std::io::{IsTerminal, Write};
+use std::io::IsTerminal;
 use std::time::Duration;
 
 use clap::{Args, Subcommand, ValueEnum};
@@ -16,508 +16,364 @@ use zbus::{OwnedObjectPath, OwnedVariant, Variant};
 use zeroize::Zeroizing;
 
 use crate::common::{
-    addresses_text, dash_if_empty, device_json, failure, format_age, json_str_or_dash,
-    json_string_list, link_has_l3, print, print_device_summary, print_table, profile_security,
-    profiles_by_ssid, prompt_secret, resolve_profile, secret_bundle, setting_string, signal_text,
-    stdin_secret,
+    CliError, CliResult, DeviceOpt, OnOff, dash_if_empty, format_age, format_ambiguous_profiles,
+    matching_profiles, print, print_device_summary, print_table, profile_security, prompt_secret,
+    resolve_device, secret_bundle, setting_string, stdin_secret,
 };
 use crate::polkit;
-use crate::profile::forget;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum PersonalSecurityMode {
+    Open,
+    Owe,
+    WpaPersonal,
+    Wpa3Personal,
+}
+
+impl PersonalSecurityMode {
+    pub(crate) const fn to_profile_security(self) -> ProfileSecurity {
+        match self {
+            Self::Open => ProfileSecurity::Open,
+            Self::Owe => ProfileSecurity::Owe,
+            Self::WpaPersonal => ProfileSecurity::WpaPersonal,
+            Self::Wpa3Personal => ProfileSecurity::Wpa3Personal,
+        }
+    }
+}
 
 #[derive(Debug, Subcommand)]
 pub(crate) enum Wifi {
-    /// Detailed state of one device (or the first wireless device).
-    Status { device: Option<String> },
-    /// Scan and print the results.
+    /// Scan for visible networks (or print cached results with `--cached`).
     Scan {
-        device: String,
+        #[command(flatten)]
+        device: DeviceOpt,
         /// Show every BSS instead of the strongest BSS per SSID.
-        #[arg(long)]
+        #[arg(short = 'a', long)]
         all: bool,
-    },
-    /// Print the latest scan results without scanning.
-    List {
-        device: String,
-        /// Show every BSS instead of the strongest BSS per SSID.
+        /// Print the latest cached scan results without triggering a new scan.
         #[arg(long)]
-        all: bool,
+        cached: bool,
     },
-    /// Join a network, creating or updating its profile.
-    Join(JoinArgs),
-    /// Connect to an existing saved profile.
+    /// Connect to a saved profile (by id, name, or SSID) or join a new SSID.
     Connect(ConnectArgs),
     /// Disconnect and hold autoconnect until explicitly resumed.
-    Disconnect { device: String },
-    /// Forget a saved network.
-    Forget {
-        profile: String,
-        /// Do not ask for confirmation.
+    Disconnect {
+        #[command(flatten)]
+        device: DeviceOpt,
+        /// Return immediately after the request is accepted.
         #[arg(long)]
-        yes: bool,
+        no_wait: bool,
+        /// Seconds to wait for the link to become idle.
+        #[arg(short = 't', long, default_value_t = 15)]
+        timeout: u64,
     },
-    /// Enable or disable autoconnect without changing the current link.
+    /// Show or change station autoconnect without changing the current link.
     Autoconnect {
-        device: String,
+        /// Omit to query the current autoconnect state.
         #[arg(value_enum)]
-        state: OnOff,
+        state: Option<OnOff>,
+        #[command(flatten)]
+        device: DeviceOpt,
     },
-    /// Turn wireless on.
-    On,
-    /// Turn wireless off.
-    Off,
-    /// Show recent connection events, newest first.
+    /// Show recent Wi-Fi station connection events, newest first.
     History {
-        #[arg(long, default_value_t = 20)]
+        /// Filter events to one wireless interface.
+        #[arg(short = 'd', long = "device", value_name = "IFACE")]
+        device: Option<String>,
+        /// Maximum number of events to display.
+        #[arg(short = 'n', long, default_value_t = 20)]
         limit: u32,
     },
 }
 
-#[derive(Debug, Clone, Copy, ValueEnum)]
-pub(crate) enum OnOff {
-    On,
-    Off,
-}
-
 #[derive(Debug, Args)]
 #[allow(clippy::struct_excessive_bools)]
-pub(crate) struct JoinArgs {
-    pub(crate) device: String,
-    pub(crate) ssid: String,
-    /// `open`, `owe`, `wpa-personal`, or `wpa3-personal`. Inferred from the
-    /// scan when omitted.
-    #[arg(long)]
-    pub(crate) security: Option<String>,
+pub(crate) struct ConnectArgs {
+    /// Saved profile (id, id prefix, name, or SSID) or new SSID to join.
+    pub(crate) target: String,
+    #[command(flatten)]
+    pub(crate) device: DeviceOpt,
+    /// Security mode for a new network (inferred from scan when omitted).
+    #[arg(long, value_enum)]
+    pub(crate) security: Option<PersonalSecurityMode>,
+    /// Human-readable label for a created or updated profile.
     #[arg(long)]
     pub(crate) name: Option<String>,
+    /// Autoconnect priority (higher wins; allows negative values).
     #[arg(long, allow_hyphen_values = true)]
     pub(crate) priority: Option<i32>,
-    /// The network is hidden; requires `--security`.
+    /// The network does not broadcast its SSID; requires `--security`.
     #[arg(long)]
     pub(crate) hidden: bool,
-    /// Prompt for the passphrase even if the profile already has one.
+    /// Prompt for a passphrase even if the profile already stores one.
     #[arg(long, conflicts_with = "secret_stdin")]
     pub(crate) ask_secret: bool,
     /// Read the passphrase from the first line of standard input.
     #[arg(long)]
     pub(crate) secret_stdin: bool,
-    /// Return as soon as the request is accepted.
+    /// Return immediately after the request is accepted.
     #[arg(long)]
     pub(crate) no_wait: bool,
     /// Seconds to wait for `connected`.
-    #[arg(long, default_value_t = 30)]
+    #[arg(short = 't', long, default_value_t = 30)]
     pub(crate) timeout: u64,
 }
 
-#[derive(Debug, Args)]
-pub(crate) struct ConnectArgs {
-    pub(crate) device: String,
-    /// Profile id, name, or SSID.
-    pub(crate) profile: String,
-    /// Prompt for a passphrase and store it if the profile has none.
-    #[arg(long, conflicts_with = "secret_stdin")]
-    pub(crate) ask_secret: bool,
-    /// Read a passphrase from the first line of standard input.
-    #[arg(long)]
-    pub(crate) secret_stdin: bool,
-    /// Return as soon as the request is accepted.
-    #[arg(long)]
-    pub(crate) no_wait: bool,
-    /// Seconds to wait for `connected`.
-    #[arg(long, default_value_t = 30)]
-    pub(crate) timeout: u64,
-}
-
-pub(crate) async fn status(client: &Client, json: bool, watch: bool) -> zbus::Result<()> {
-    if json && watch {
-        return Err(failure("--watch cannot be combined with --json"));
-    }
-    loop {
-        let value = status_value(client).await?;
-        if watch && std::io::stdout().is_terminal() {
-            print!("\x1b[2J\x1b[H");
-            let _ = std::io::stdout().flush();
-        }
-        print(json, &value, || print_status_overview(&value));
-        if !watch {
-            return Ok(());
-        }
-        tokio::select! {
-            _ = tokio::signal::ctrl_c() => return Ok(()),
-            () = tokio::time::sleep(Duration::from_secs(1)) => {}
-        }
-    }
-}
-
-async fn status_value(client: &Client) -> zbus::Result<Value> {
-    let manager = client.manager().await?;
-    let wireless = manager.wireless_enabled().await?;
-    let hardware = manager.wireless_hardware_enabled().await?;
-    let online = manager.online_state().await?;
-    let mut devices = Vec::new();
-    for device in client.devices().await? {
-        devices.push(device_json(&device).await?);
-    }
-    Ok(json!({
-        "wireless_enabled": wireless,
-        "wireless_hardware_enabled": hardware,
-        "online_state": online,
-        "devices": devices,
-    }))
-}
-
-fn print_status_overview(value: &Value) {
-    let sw = if value["wireless_enabled"].as_bool() == Some(true) {
-        "on"
-    } else {
-        "off"
-    };
-    let hw_note = if value["wireless_hardware_enabled"].as_bool() == Some(false) {
-        " (rfkill: hard-blocked)"
-    } else {
-        ""
-    };
-    let online = value["online_state"].as_str().unwrap_or("offline");
-    println!("wireless: {sw}{hw_note}  online: {online}");
-    let mut rows = Vec::new();
-    for device in value["devices"].as_array().into_iter().flatten() {
-        let state = device["state"].as_str().unwrap_or("");
-        let addresses = if link_has_l3(state) {
-            json_string_list(device, "addresses")
-        } else {
-            Vec::new()
-        };
-        rows.push(vec![
-            device["interface"].as_str().unwrap_or("").to_owned(),
-            state.to_owned(),
-            json_str_or_dash(device, "ssid").to_owned(),
-            addresses_text(&addresses),
-            signal_text(i16::try_from(device["signal"].as_i64().unwrap_or(0)).unwrap_or(0)),
-            device["last_failure"].as_str().unwrap_or("").to_owned(),
-        ]);
-    }
-    print_table(
-        &["IFACE", "STATE", "SSID", "ADDRESSES", "SIGNAL", "FAILURE"],
-        &rows,
-    );
-}
-
-pub(crate) async fn run(client: &Client, bus: &str, command: Wifi, json: bool) -> zbus::Result<()> {
+pub(crate) async fn run(
+    client: &Client,
+    bus: &str,
+    polkit_guard: &mut polkit::PolkitGuard,
+    command: Wifi,
+    json: bool,
+) -> CliResult<()> {
     match command {
-        Wifi::Status { device } => wifi_status(client, device.as_deref(), json).await,
-        Wifi::Scan { device, all } => {
-            let device = client.device(&device).await?;
-            let results = scan_and_get(&device, Duration::from_secs(20)).await?;
+        Wifi::Scan {
+            device,
+            all,
+            cached,
+        } => {
+            let (_, proxy) = resolve_device(client, device.device.as_deref(), None).await?;
+            let results = if cached {
+                proxy.get_scan_results().await?
+            } else {
+                scan_and_get(&proxy, Duration::from_secs(20)).await?
+            };
             print_scan(json, &results, all);
             Ok(())
         }
-        Wifi::List { device, all } => {
-            let results = client.device(&device).await?.get_scan_results().await?;
-            print_scan(json, &results, all);
-            Ok(())
+        Wifi::Connect(args) => wifi_connect(client, bus, polkit_guard, args, json).await,
+        Wifi::Disconnect {
+            device,
+            no_wait,
+            timeout,
+        } => wifi_disconnect(client, device.device.as_deref(), no_wait, timeout, json).await,
+        Wifi::Autoconnect { state, device } => {
+            wifi_autoconnect(client, device.device.as_deref(), state, json).await
         }
-        Wifi::Join(args) => wifi_join(client, bus, args, json).await,
-        Wifi::Connect(args) => wifi_connect(client, bus, args, json).await,
-        Wifi::Disconnect { device } => {
-            client.device(&device).await?.disconnect().await?;
-            print(
-                json,
-                &json!({"device": device, "state": "disconnected"}),
-                || {
-                    println!(
-                        "{device}: disconnected; autoconnect is held until `kestrel wifi autoconnect {device} on`"
-                    );
-                },
-            );
-            Ok(())
+        Wifi::History { device, limit } => {
+            wifi_history(client, device.as_deref(), limit, json).await
         }
-        Wifi::Forget { profile, yes } => forget(client, &profile, yes, json).await,
-        Wifi::Autoconnect { device, state } => {
-            let enabled = matches!(state, OnOff::On);
-            let proxy = client.device(&device).await?;
-            proxy.set_autoconnect(enabled).await?;
-            wait_autoconnect(&proxy, enabled).await?;
-            print(
-                json,
-                &json!({"device": device, "autoconnect": enabled}),
-                || {
-                    println!(
-                        "{device}: autoconnect {}",
-                        if enabled { "on" } else { "off" }
-                    );
-                },
-            );
-            Ok(())
-        }
-        Wifi::On => {
-            client.manager().await?.set_wireless_enabled(true).await?;
-            print(json, &json!({"wireless_enabled": true}), || {
-                println!("wireless: on");
-            });
-            Ok(())
-        }
-        Wifi::Off => {
-            client.manager().await?.set_wireless_enabled(false).await?;
-            print(json, &json!({"wireless_enabled": false}), || {
-                println!("wireless: off");
-            });
-            Ok(())
-        }
-        Wifi::History { limit } => wifi_history(client, limit, json).await,
     }
 }
 
-async fn wifi_status(client: &Client, device: Option<&str>, json: bool) -> zbus::Result<()> {
-    let device = if let Some(name) = device {
-        client.device(name).await?
-    } else {
-        client
-            .devices()
-            .await?
-            .into_iter()
-            .next()
-            .ok_or_else(|| failure("no wireless devices"))?
-    };
-    let value = device_json(&device).await?;
-    print(json, &value, || print_wifi_status(&value));
+async fn wifi_disconnect(
+    client: &Client,
+    device: Option<&str>,
+    no_wait: bool,
+    timeout: u64,
+    json: bool,
+) -> CliResult<()> {
+    let (iface, proxy) = resolve_device(client, device, None).await?;
+    let mut state_changes = proxy.receive_state_changed().await;
+    proxy.disconnect().await?;
+    if !no_wait {
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(timeout);
+        loop {
+            let state = proxy.state().await?;
+            if matches!(state.as_str(), "idle" | "disabled" | "waiting") {
+                break;
+            }
+            tokio::select! {
+                _ = tokio::signal::ctrl_c() => return Err(CliError::Interrupted),
+                () = tokio::time::sleep_until(deadline) => {
+                    return Err(CliError::timeout("timed out waiting for disconnect"));
+                }
+                event = state_changes.next() => {
+                    if event.is_none() {
+                        break;
+                    }
+                }
+            }
+        }
+    }
+    print(
+        json,
+        &json!({"device": iface, "state": "disconnected"}),
+        || {
+            println!(
+                "{iface}: disconnected; autoconnect is held until `kestrel wifi autoconnect on`"
+            );
+        },
+    );
     Ok(())
 }
 
-fn print_wifi_status(value: &Value) {
-    let state = value["state"].as_str().unwrap_or("");
-    let active = link_has_l3(state);
-    let supported = json_string_list(value, "supported_security");
-    let addresses = if active {
-        json_string_list(value, "addresses")
+async fn wifi_autoconnect(
+    client: &Client,
+    device: Option<&str>,
+    state: Option<OnOff>,
+    json: bool,
+) -> CliResult<()> {
+    let (iface, proxy) = resolve_device(client, device, None).await?;
+    if let Some(target) = state {
+        let enabled = target.as_bool();
+        proxy.set_autoconnect(enabled).await?;
+        wait_autoconnect(&proxy, enabled).await?;
+        print(
+            json,
+            &json!({"device": iface, "autoconnect": enabled}),
+            || {
+                println!(
+                    "{iface}: autoconnect {}",
+                    if enabled { "on" } else { "off" }
+                );
+            },
+        );
     } else {
-        Vec::new()
-    };
-    let gateways = if active {
-        json_string_list(value, "gateways")
-    } else {
-        Vec::new()
-    };
-    let dns = if active {
-        json_string_list(value, "dns")
-    } else {
-        Vec::new()
-    };
-    println!("Interface: {}", value["interface"].as_str().unwrap_or(""));
-    println!("State: {state}");
-    if value["scanning"].as_bool() == Some(true) {
-        println!("Scanning: yes");
+        let enabled = proxy.autoconnect_enabled().await?;
+        let held = proxy.autoconnect_held().await?;
+        print(
+            json,
+            &json!({
+                "device": iface,
+                "autoconnect": enabled,
+                "held": held,
+            }),
+            || {
+                let held_note = if held { " (held)" } else { "" };
+                println!(
+                    "{iface}: autoconnect {}{held_note}",
+                    if enabled { "on" } else { "off" }
+                );
+            },
+        );
     }
-    println!("SSID: {}", json_str_or_dash(value, "ssid"));
-    println!("BSSID: {}", json_str_or_dash(value, "bssid"));
-    println!("Security: {}", json_str_or_dash(value, "security"));
-    let frequency = value["frequency"].as_u64().unwrap_or(0);
-    println!(
-        "Frequency: {}",
-        if frequency == 0 {
-            "-".to_owned()
-        } else {
-            format!("{frequency} MHz")
-        }
-    );
-    println!(
-        "Signal: {}",
-        signal_text(i16::try_from(value["signal"].as_i64().unwrap_or(0)).unwrap_or(0))
-    );
-    println!("Supported security: {}", addresses_text(&supported));
-    println!("Addresses: {}", addresses_text(&addresses));
-    println!("Gateways: {}", addresses_text(&gateways));
-    println!("DNS: {}", addresses_text(&dns));
-    println!(
-        "L3: {}",
-        if active {
-            value["l3_phase"].as_str().unwrap_or("pending")
-        } else {
-            "pending"
-        }
-    );
-    println!(
-        "Online: {}",
-        if active {
-            value["online_state"].as_str().unwrap_or("offline")
-        } else {
-            "offline"
-        }
-    );
-    println!(
-        "Autoconnect: {}",
-        if value["autoconnect_enabled"].as_bool() == Some(true) {
-            "on"
-        } else {
-            "off"
-        }
-    );
-    let profile = value["profile"].as_str().unwrap_or("/");
-    println!("Profile: {}", if profile == "/" { "-" } else { profile });
-    let needing = json_string_list(value, "profiles_needing_secrets");
-    if !needing.is_empty() {
-        println!("Profiles needing secrets: {}", needing.join(", "));
-    }
-    let last_failure = value["last_failure"].as_str().unwrap_or("");
-    if !last_failure.is_empty() {
-        println!("Last failure: {last_failure}");
-    }
-}
-
-async fn wifi_join(client: &Client, bus: &str, args: JoinArgs, json: bool) -> zbus::Result<()> {
-    let device = client.device(&args.device).await?;
-    let security = match args.security.as_deref() {
-        Some(security) => {
-            ProfileSecurity::parse(security).map_err(|error| failure(error.to_string()))?
-        }
-        None if args.hidden => {
-            return Err(failure(
-                "a hidden network needs --security open|owe|wpa-personal|wpa3-personal",
-            ));
-        }
-        None => infer_security(&device, &args.ssid, Duration::from_secs(args.timeout)).await?,
-    };
-    if security.is_enterprise() {
-        return Err(failure(
-            "enterprise networks require `kestrel profile add` with --eap and --identity",
-        ));
-    }
-
-    let existing = profiles_by_ssid(client, &args.ssid).await?;
-    if existing.len() > 1 {
-        return Err(failure(format!(
-            "{:?} matches several profiles; use `kestrel profile list` and delete the duplicates",
-            args.ssid
-        )));
-    }
-    let existing = existing.into_iter().next();
-    let (unmanaged, existing_security, existing_has_secret) = if let Some(profile) = &existing {
-        let existing_settings = profile.settings().await?;
-        (
-            setting_string(&existing_settings, "l3") == "unmanaged",
-            Some(setting_string(&existing_settings, "security")),
-            profile.has_secret().await?,
-        )
-    } else {
-        (false, None, false)
-    };
-    let will_prompt_or_set_secret = args.secret_stdin
-        || args.ask_secret
-        || (security.needs_secret()
-            && !(existing.is_some()
-                && existing_security.as_deref() == Some(security.as_str())
-                && existing_has_secret));
-    let will_modify = existing.is_none()
-        || will_prompt_or_set_secret
-        || args.name.is_some()
-        || args.priority.is_some()
-        || args.hidden
-        || existing_security.as_deref() != Some(security.as_str());
-    let _modify_guard = if will_modify {
-        Some(
-            polkit::ensure_authorized(client.connection(), bus, &[polkit::ACTION_MODIFY_PROFILES])
-                .await?,
-        )
-    } else {
-        None
-    };
-
-    let secret = join_secret(&args, security, existing.as_ref()).await?;
-    let settings = join_settings(&args, security);
-    let path = if let Some(profile) = &existing {
-        let needs_update = secret.is_some()
-            || args.name.is_some()
-            || args.priority.is_some()
-            || args.hidden
-            || existing_security.as_deref() != Some(security.as_str());
-        if needs_update {
-            let action = if secret.is_some() { "set" } else { "keep" };
-            profile
-                .update(
-                    settings,
-                    action,
-                    secret_bundle(secret.as_deref().map(String::as_str)),
-                )
-                .await?;
-        }
-        profile.inner().path().to_owned().into()
-    } else {
-        client
-            .manager()
-            .await?
-            .add_profile(
-                settings,
-                secret_bundle(secret.as_deref().map(String::as_str)),
-            )
-            .await?
-    };
-
-    connect_and_wait(
-        &device,
-        &path,
-        &args.device,
-        Some(&args.ssid),
-        args.no_wait,
-        unmanaged,
-        Duration::from_secs(args.timeout),
-        json,
-    )
-    .await
+    Ok(())
 }
 
 async fn wifi_connect(
     client: &Client,
     bus: &str,
+    polkit_guard: &mut polkit::PolkitGuard,
     args: ConnectArgs,
     json: bool,
-) -> zbus::Result<()> {
-    let path = resolve_profile(client, &args.profile).await?;
-    let profile = client.profile(path.clone()).await?;
-    let settings = profile.settings().await?;
-    let security = profile_security(&settings)?;
-    let unmanaged = setting_string(&settings, "l3") == "unmanaged";
-    let is_eap_tls = setting_string(&settings, "enterprise.eap") == "tls";
-    let needs_secret_update = args.secret_stdin
-        || args.ask_secret
-        || (security.needs_secret() && !profile.has_secret().await?);
-    let _modify_guard = if needs_secret_update {
-        Some(
-            polkit::ensure_authorized(client.connection(), bus, &[polkit::ACTION_MODIFY_PROFILES])
-                .await?,
-        )
-    } else {
-        None
-    };
-    if args.secret_stdin || args.ask_secret {
-        let secret = if args.secret_stdin {
-            stdin_secret()?
-        } else {
-            prompt_secret()?
-        };
-        profile
-            .update(HashMap::new(), "set", secret_bundle(Some(secret.as_str())))
-            .await?;
-    } else if security.needs_secret() && !profile.has_secret().await? {
-        if is_eap_tls {
-            return Err(failure(
-                "this EAP-TLS profile has no private key; run `kestrel profile edit --private-key-file <path>`",
-            ));
+) -> CliResult<()> {
+    let (iface, device) = resolve_device(client, args.device.device.as_deref(), None).await?;
+    let mut matches = matching_profiles(client, &args.target).await?;
+
+    match matches.len() {
+        1 => {
+            let entry = matches.remove(0);
+            connect_existing(
+                client,
+                bus,
+                polkit_guard,
+                &iface,
+                &device,
+                entry.proxy,
+                entry.path,
+                args,
+                json,
+            )
+            .await
         }
-        let secret = if std::io::stdin().is_terminal() {
-            prompt_secret()?
-        } else {
-            return Err(failure(
-                "the profile has no passphrase; use --secret-stdin in a script",
-            ));
-        };
-        profile
-            .update(HashMap::new(), "set", secret_bundle(Some(secret.as_str())))
+        0 => connect_new(client, bus, polkit_guard, &iface, &device, args, json).await,
+        _ => Err(CliError::runtime(format_ambiguous_profiles(
+            &args.target,
+            &matches,
+        ))),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+async fn connect_existing(
+    client: &Client,
+    bus: &str,
+    polkit_guard: &mut polkit::PolkitGuard,
+    iface: &str,
+    device: &DeviceProxy<'_>,
+    profile: ProfileProxy<'_>,
+    path: OwnedObjectPath,
+    args: ConnectArgs,
+    json: bool,
+) -> CliResult<()> {
+    let existing_settings = profile.settings().await?;
+    let existing_security = profile_security(&existing_settings)?;
+    let unmanaged = setting_string(&existing_settings, "l3") == "unmanaged";
+    let is_eap_tls = setting_string(&existing_settings, "enterprise.eap") == "tls";
+    let existing_has_secret = profile.has_secret().await?;
+
+    let target_security = match args.security {
+        Some(mode) => {
+            if existing_security.is_enterprise() {
+                return Err(CliError::runtime(
+                    "use `kestrel profile edit` to change an 802.1X enterprise profile's security mode",
+                ));
+            }
+            mode.to_profile_security()
+        }
+        None => existing_security,
+    };
+
+    let security_changed = target_security != existing_security;
+    let missing_secret =
+        target_security.needs_secret() && (!existing_has_secret || security_changed);
+    let wants_secret = args.secret_stdin || args.ask_secret || missing_secret;
+    let wants_settings_update =
+        security_changed || args.name.is_some() || args.priority.is_some() || args.hidden;
+
+    if wants_secret || wants_settings_update {
+        polkit_guard
+            .ensure_authorized(client.connection(), bus, &[polkit::ACTION_MODIFY_PROFILES])
             .await?;
     }
 
-    let device = client.device(&args.device).await?;
+    let secret = if args.secret_stdin {
+        Some(stdin_secret()?)
+    } else if args.ask_secret {
+        Some(prompt_secret()?)
+    } else if missing_secret {
+        if is_eap_tls {
+            return Err(CliError::runtime(
+                "this EAP-TLS profile has no private key; run `kestrel profile edit <profile> --private-key-file <path>`",
+            ));
+        }
+        if std::io::stdin().is_terminal() {
+            Some(prompt_secret()?)
+        } else {
+            return Err(CliError::runtime(
+                "this profile has no passphrase; use --secret-stdin in a script",
+            ));
+        }
+    } else {
+        None
+    };
+
+    if wants_settings_update || secret.is_some() {
+        let mut settings: ProfileSettings = HashMap::new();
+        let mut put = |key: &str, value: Variant<'_>| {
+            settings.insert(
+                key.to_owned(),
+                OwnedVariant::try_from(value).expect("plain value"),
+            );
+        };
+        if security_changed {
+            put("security", Variant::from(target_security.as_str()));
+        }
+        if let Some(name) = &args.name {
+            put("name", Variant::from(name.as_str()));
+        }
+        if let Some(priority) = args.priority {
+            put("priority", Variant::from(priority));
+        }
+        if args.hidden {
+            put("hidden", Variant::from(true));
+        }
+        let action = if secret.is_some() { "set" } else { "keep" };
+        profile
+            .update(
+                settings,
+                action,
+                secret_bundle(secret.as_deref().map(String::as_str)),
+            )
+            .await?;
+    }
+
     connect_and_wait(
-        &device,
+        client,
+        device,
         &path,
-        &args.device,
+        iface,
         None,
         args.no_wait,
         unmanaged,
@@ -527,8 +383,70 @@ async fn wifi_connect(
     .await
 }
 
+async fn connect_new(
+    client: &Client,
+    bus: &str,
+    polkit_guard: &mut polkit::PolkitGuard,
+    iface: &str,
+    device: &DeviceProxy<'_>,
+    args: ConnectArgs,
+    json: bool,
+) -> CliResult<()> {
+    let security = match args.security {
+        Some(mode) => mode.to_profile_security(),
+        None if args.hidden => {
+            return Err(CliError::runtime(
+                "a hidden network needs --security open|owe|wpa-personal|wpa3-personal",
+            ));
+        }
+        None => {
+            infer_security(
+                device,
+                &args.target,
+                Duration::from_secs(args.timeout),
+                json,
+            )
+            .await?
+        }
+    };
+    if security.is_enterprise() {
+        return Err(CliError::runtime(
+            "enterprise networks require `kestrel profile add <SSID> --security wpa-enterprise --eap <method> --identity <name>`",
+        ));
+    }
+
+    polkit_guard
+        .ensure_authorized(client.connection(), bus, &[polkit::ACTION_MODIFY_PROFILES])
+        .await?;
+
+    let secret = new_network_secret(&args, security)?;
+    let settings = new_network_settings(&args, security);
+    let path = client
+        .manager()
+        .await?
+        .add_profile(
+            settings,
+            secret_bundle(secret.as_deref().map(String::as_str)),
+        )
+        .await?;
+
+    connect_and_wait(
+        client,
+        device,
+        &path,
+        iface,
+        Some(&args.target),
+        args.no_wait,
+        false,
+        Duration::from_secs(args.timeout),
+        json,
+    )
+    .await
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn connect_and_wait(
+    client: &Client,
     device: &DeviceProxy<'_>,
     path: &OwnedObjectPath,
     device_name: &str,
@@ -537,7 +455,7 @@ async fn connect_and_wait(
     unmanaged: bool,
     timeout: Duration,
     json: bool,
-) -> zbus::Result<()> {
+) -> CliResult<()> {
     // Subscribe BEFORE issuing `connect()` so fast transitions and failures
     // are never missed and stale pre-existing failures are ignored.
     let previous_failure = device.last_failure().await.unwrap_or_default();
@@ -545,28 +463,36 @@ async fn connect_and_wait(
     let failure_changes = device.receive_last_failure_changed().await;
     device.connect(&path.as_ref()).await?;
     if no_wait {
+        let profile_id = client
+            .profile(path.clone())
+            .await
+            .ok()
+            .map(|p| async move { p.id().await.unwrap_or_default() });
+        let id = match profile_id {
+            Some(fut) => fut.await,
+            None => String::new(),
+        };
         let payload = if let Some(ssid) = ssid {
             json!({
                 "device": device_name,
                 "ssid": ssid,
                 "profile": path.as_str(),
+                "profile_id": id,
                 "state": "requested",
             })
         } else {
             json!({
                 "device": device_name,
                 "profile": path.as_str(),
+                "profile_id": id,
                 "state": "requested",
             })
         };
         print(json, &payload, || {
             if let Some(ssid) = ssid {
-                println!(
-                    "{device_name}: joining {ssid:?} (profile {})",
-                    path.as_str()
-                );
+                println!("{device_name}: connecting to {ssid:?}");
             } else {
-                println!("{device_name}: connecting (profile {})", path.as_str());
+                println!("{device_name}: connecting");
             }
         });
         return Ok(());
@@ -583,13 +509,15 @@ async fn connect_and_wait(
     if !unmanaged {
         wait_l3_ready(device, Duration::from_secs(5)).await?;
     }
-    print_device_summary(device, json).await
+    let fresh = DeviceProxy::builder(client.connection())
+        .path(device.inner().path().to_owned())
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+        .await?;
+    print_device_summary(client, &fresh, json).await
 }
 
-async fn scan_and_get(
-    device: &DeviceProxy<'_>,
-    timeout: Duration,
-) -> zbus::Result<Vec<ScanResult>> {
+async fn scan_and_get(device: &DeviceProxy<'_>, timeout: Duration) -> CliResult<Vec<ScanResult>> {
     let mut results_changed = device.receive_scan_results_changed().await?;
     let mut scanning_changed = device.receive_scanning_changed().await;
     device.scan().await?;
@@ -597,18 +525,19 @@ async fn scan_and_get(
     let mut saw_scanning = device.scanning().await.unwrap_or(false);
     loop {
         tokio::select! {
+            _ = tokio::signal::ctrl_c() => return Err(CliError::Interrupted),
             () = tokio::time::sleep_until(deadline) => {
-                return Err(failure("scan timed out"));
+                return Err(CliError::timeout("scan timed out"));
             }
             signal = results_changed.next() => {
                 match signal {
                     Some(_) => break,
-                    None => return Err(failure("scan stream closed")),
+                    None => return Err(CliError::runtime("scan stream closed")),
                 }
             }
             change = scanning_changed.next() => {
                 let Some(change) = change else {
-                    return Err(failure("scan stream closed"));
+                    return Err(CliError::runtime("scan stream closed"));
                 };
                 if let Ok(scanning) = change.get().await {
                     if scanning {
@@ -622,20 +551,12 @@ async fn scan_and_get(
             }
         }
     }
-    device.get_scan_results().await
+    Ok(device.get_scan_results().await?)
 }
 
-async fn infer_security(
-    device: &DeviceProxy<'_>,
-    ssid: &str,
-    timeout: Duration,
-) -> zbus::Result<ProfileSecurity> {
-    let results = match scan_and_get(device, timeout).await {
-        Ok(results) => results,
-        Err(_) => device.get_scan_results().await?,
-    };
+fn best_security_for_ssid(results: &[ScanResult], ssid: &str) -> Option<ProfileSecurity> {
     let mut best: Option<(i16, ProfileSecurity)> = None;
-    for (found, _, _, signal, security, _) in &results {
+    for (found, _, _, signal, security, _) in results {
         if found != ssid {
             continue;
         }
@@ -645,18 +566,40 @@ async fn infer_security(
             best = Some((*signal, candidate));
         }
     }
-    best.map(|(_, security)| security).ok_or_else(|| {
-        failure(format!(
+    best.map(|(_, security)| security)
+}
+
+async fn infer_security(
+    device: &DeviceProxy<'_>,
+    ssid: &str,
+    timeout: Duration,
+    json: bool,
+) -> CliResult<ProfileSecurity> {
+    if let Ok(cached) = device.get_scan_results().await
+        && let Some(security) = best_security_for_ssid(&cached, ssid)
+    {
+        return Ok(security);
+    }
+    if !json && std::io::stderr().is_terminal() {
+        eprintln!("scanning for {ssid:?}...");
+    }
+    let scan_timeout = timeout.min(Duration::from_secs(15));
+    let results = match scan_and_get(device, scan_timeout).await {
+        Ok(results) => results,
+        Err(CliError::Interrupted) => return Err(CliError::Interrupted),
+        Err(_) => device.get_scan_results().await?,
+    };
+    best_security_for_ssid(&results, ssid).ok_or_else(|| {
+        CliError::runtime(format!(
             "{ssid:?} was not found; use --hidden --security <mode> for a hidden network"
         ))
     })
 }
 
-async fn join_secret(
-    args: &JoinArgs,
+fn new_network_secret(
+    args: &ConnectArgs,
     security: ProfileSecurity,
-    existing: Option<&ProfileProxy<'_>>,
-) -> zbus::Result<Option<Zeroizing<String>>> {
+) -> CliResult<Option<Zeroizing<String>>> {
     if args.secret_stdin {
         return stdin_secret().map(Some);
     }
@@ -666,24 +609,16 @@ async fn join_secret(
     if !security.needs_secret() {
         return Ok(None);
     }
-    if let Some(existing) = existing {
-        let settings = existing.settings().await?;
-        if setting_string(&settings, "security") == security.as_str()
-            && existing.has_secret().await?
-        {
-            return Ok(None);
-        }
-    }
     if std::io::stdin().is_terminal() {
         prompt_secret().map(Some)
     } else {
-        Err(failure(
+        Err(CliError::runtime(
             "this network needs a passphrase; use --secret-stdin in a script",
         ))
     }
 }
 
-fn join_settings(args: &JoinArgs, security: ProfileSecurity) -> ProfileSettings {
+fn new_network_settings(args: &ConnectArgs, security: ProfileSecurity) -> ProfileSettings {
     let mut settings = HashMap::new();
     let mut put = |key: &str, value: Variant<'_>| {
         settings.insert(
@@ -691,7 +626,7 @@ fn join_settings(args: &JoinArgs, security: ProfileSecurity) -> ProfileSettings 
             OwnedVariant::try_from(value).expect("plain value"),
         );
     };
-    put("ssid", Variant::from(args.ssid.as_str()));
+    put("ssid", Variant::from(args.target.as_str()));
     put("security", Variant::from(security.as_str()));
     if let Some(name) = &args.name {
         put("name", Variant::from(name.as_str()));
@@ -712,7 +647,7 @@ async fn wait_connected(
     mut state_changes: zbus::proxy::PropertyStream<'_, String>,
     mut failure_changes: zbus::proxy::PropertyStream<'_, String>,
     timeout: Duration,
-) -> zbus::Result<()> {
+) -> CliResult<()> {
     let deadline = tokio::time::Instant::now() + timeout;
     let mut saw_attempt = false;
     loop {
@@ -728,16 +663,19 @@ async fn wait_connected(
         }
         match state.as_str() {
             "connected" if active == *target_profile => return Ok(()),
-            "disabled" => return Err(failure("wireless is disabled")),
+            "disabled" => return Err(CliError::runtime("wireless is disabled")),
             "idle" | "waiting" => {
                 let last_failure = device.last_failure().await?;
                 if !last_failure.is_empty() && (saw_attempt || last_failure != previous_failure) {
-                    return Err(failure(format!("connection failed: {last_failure}")));
+                    return Err(CliError::runtime(format!(
+                        "connection failed: {last_failure}"
+                    )));
                 }
             }
             _ => {}
         }
         tokio::select! {
+            _ = tokio::signal::ctrl_c() => return Err(CliError::Interrupted),
             () = tokio::time::sleep_until(deadline) => {
                 let last_failure = device.last_failure().await?;
                 let detail = if last_failure.is_empty() {
@@ -745,11 +683,13 @@ async fn wait_connected(
                 } else {
                     format!(" ({last_failure})")
                 };
-                return Err(failure(format!("timed out waiting for a connection{detail}")));
+                return Err(CliError::timeout(format!(
+                    "timed out waiting for a connection{detail}"
+                )));
             }
             event = state_changes.next() => {
                 let Some(change) = event else {
-                    return Err(failure("device disappeared while waiting"));
+                    return Err(CliError::runtime("device disappeared while waiting"));
                 };
                 if let Ok(state) = change.get().await
                     && matches!(
@@ -762,7 +702,7 @@ async fn wait_connected(
             }
             event = failure_changes.next() => {
                 if event.is_none() {
-                    return Err(failure("device disappeared while waiting"));
+                    return Err(CliError::runtime("device disappeared while waiting"));
                 }
                 saw_attempt = true;
             }
@@ -770,20 +710,20 @@ async fn wait_connected(
     }
 }
 
-async fn wait_autoconnect(device: &DeviceProxy<'_>, enabled: bool) -> zbus::Result<()> {
+async fn wait_autoconnect(device: &DeviceProxy<'_>, enabled: bool) -> CliResult<()> {
     let deadline = tokio::time::Instant::now() + Duration::from_secs(2);
     loop {
         if device.autoconnect_enabled().await? == enabled {
             return Ok(());
         }
         if tokio::time::Instant::now() >= deadline {
-            return Err(failure("timed out waiting for autoconnect state"));
+            return Err(CliError::timeout("timed out waiting for autoconnect state"));
         }
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
 }
 
-async fn wait_l3_ready(device: &DeviceProxy<'_>, timeout: Duration) -> zbus::Result<()> {
+async fn wait_l3_ready(device: &DeviceProxy<'_>, timeout: Duration) -> CliResult<()> {
     let mut phase_changes = device.receive_l3_phase_changed().await;
     let deadline = tokio::time::Instant::now() + timeout;
     loop {
@@ -796,11 +736,14 @@ async fn wait_l3_ready(device: &DeviceProxy<'_>, timeout: Duration) -> zbus::Res
                 } else {
                     format!(": {detail}")
                 };
-                return Err(failure(format!("L3 configuration failed{suffix}")));
+                return Err(CliError::runtime(format!(
+                    "L3 configuration failed{suffix}"
+                )));
             }
             _ => {}
         }
         tokio::select! {
+            _ = tokio::signal::ctrl_c() => return Err(CliError::Interrupted),
             () = tokio::time::sleep_until(deadline) => return Ok(()),
             event = phase_changes.next() => {
                 if event.is_none() {
@@ -811,8 +754,23 @@ async fn wait_l3_ready(device: &DeviceProxy<'_>, timeout: Duration) -> zbus::Res
     }
 }
 
-async fn wifi_history(client: &Client, limit: u32, json: bool) -> zbus::Result<()> {
-    let events = client.manager().await?.history(limit).await?;
+async fn wifi_history(
+    client: &Client,
+    device_filter: Option<&str>,
+    limit: u32,
+    json: bool,
+) -> CliResult<()> {
+    // When filtering by device, fetch up to the server cap (500) before trimming to `limit`.
+    let fetch_limit = if device_filter.is_some() && limit > 0 {
+        500
+    } else {
+        limit
+    };
+    let mut events = client.manager().await?.history(fetch_limit).await?;
+    if let Some(iface) = device_filter {
+        events.retain(|(_, dev, _, _, _, _)| dev == iface);
+        events.truncate(usize::try_from(limit).unwrap_or(usize::MAX));
+    }
     let value: Vec<Value> = events
         .iter()
         .map(|(at, device, ssid, profile, outcome, detail)| {
@@ -839,7 +797,11 @@ async fn wifi_history(client: &Client, limit: u32, json: bool) -> zbus::Result<(
                 ]
             })
             .collect();
-        print_table(&["WHEN", "DEVICE", "SSID", "OUTCOME", "DETAIL"], &rows);
+        print_table(
+            &["WHEN", "DEVICE", "SSID", "OUTCOME", "DETAIL"],
+            &rows,
+            Some("No connection history."),
+        );
     });
     Ok(())
 }
@@ -936,6 +898,7 @@ fn print_scan(json: bool, results: &[ScanResult], all: bool) {
         print_table(
             &["", "SSID", "SECURITY", "SIGNAL", "FREQUENCY", "BSSID"],
             &table,
+            Some("No networks found."),
         );
     });
 }

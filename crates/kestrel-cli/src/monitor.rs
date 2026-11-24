@@ -9,14 +9,16 @@ use kestrel_api::client::Client;
 use serde_json::{Map, Value, json};
 use zbus::OwnedVariant;
 
-pub(crate) async fn run(client: &Client, json_output: bool) -> zbus::Result<()> {
+use crate::common::CliResult;
+
+pub(crate) async fn run(client: &Client, json_output: bool) -> CliResult<()> {
     let rule = zbus::MatchRule::builder()
         .msg_type(zbus::message::Type::Signal)
         .sender(kestrel_api::BUS_NAME)
         .build()?;
     let mut stream = zbus::MessageStream::for_match_rule(rule, client.connection(), None).await?;
     if !json_output {
-        println!("watching {} (Ctrl-C to stop)", kestrel_api::BUS_NAME);
+        eprintln!("watching {} (Ctrl-C to stop)", kestrel_api::BUS_NAME);
     }
     loop {
         tokio::select! {

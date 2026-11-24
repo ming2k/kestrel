@@ -30,6 +30,7 @@ pub mod testkit;
 
 use std::collections::{BTreeMap, HashMap, HashSet};
 use std::fmt;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -63,6 +64,7 @@ pub(crate) const AGENT_PATH: &str = "/com/hihusky/Kestrel/iwd/agent";
 
 const SUPPORTED_SECURITY: [ProfileSecurity; 2] =
     [ProfileSecurity::Open, ProfileSecurity::WpaPersonal];
+const SIGNAL_QUEUE_CAPACITY: usize = 2048;
 
 type Props = HashMap<String, OwnedVariant>;
 type Objects = HashMap<OwnedObjectPath, HashMap<String, Props>>;
@@ -412,16 +414,20 @@ impl Iwd {
             let Some(ssid) = prop::<String>(props, "Name").and_then(|n| Ssid::new(n).ok()) else {
                 continue;
             };
-            let bssid = prop::<Vec<OwnedObjectPath>>(props, "ExtendedServiceSet")
+            let bss_props = prop::<Vec<OwnedObjectPath>>(props, "ExtendedServiceSet")
                 .and_then(|set| set.first().cloned())
-                .and_then(|bss| objects.get(&bss).and_then(|i| i.get(BSS)).cloned())
-                .and_then(|bss| prop::<String>(&bss, "Address"))
+                .and_then(|bss| objects.get(&bss).and_then(|i| i.get(BSS)));
+            let bssid = bss_props
+                .and_then(|bss| prop::<String>(bss, "Address"))
                 .and_then(|a| MacAddress::parse(&a).ok())
                 .unwrap_or(MacAddress::from_octets([0; 6]));
+            let frequency = bss_props
+                .and_then(|bss| prop::<u32>(bss, "Frequency"))
+                .unwrap_or(0);
             results.push(Bss {
                 ssid,
                 bssid,
-                frequency: 0,
+                frequency,
                 // iwd reports 100 * dBm.
                 signal: signal / 100,
                 security: map_security(prop::<String>(props, "Type").as_deref()),
@@ -483,9 +489,8 @@ impl Iwd {
         Ok(())
     }
 
-    async fn start_monitor(&self) -> PortResult<()> {
-        let connection = self.inner.connection.clone();
-        let rules = [
+    fn monitor_rules() -> PortResult<[zbus::MatchRule<'static>; 3]> {
+        Ok([
             zbus::MatchRule::builder()
                 .msg_type(Type::Signal)
                 .sender("org.freedesktop.DBus")
@@ -509,7 +514,12 @@ impl Iwd {
                 .path_namespace(MANAGER_PATH)
                 .build()
                 .map_err(dbus_error)?,
-        ];
+        ])
+    }
+
+    async fn start_monitor(&self) -> PortResult<()> {
+        let connection = self.inner.connection.clone();
+        let rules = Self::monitor_rules()?;
         let mut streams = Vec::with_capacity(rules.len());
         for rule in rules {
             streams.push(
@@ -518,28 +528,69 @@ impl Iwd {
                     .map_err(dbus_error)?,
             );
         }
+
         let mut merged = futures_util::stream::select_all(streams);
-        let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel();
+        let (tx, mut rx) = tokio::sync::mpsc::channel(SIGNAL_QUEUE_CAPACITY);
+        let lagged = Arc::new(AtomicBool::new(false));
+        let lag_wake = Arc::new(tokio::sync::Notify::new());
         let drain_weak = Arc::downgrade(&self.inner);
+        let drain_lagged = Arc::clone(&lagged);
+        let drain_wake = Arc::clone(&lag_wake);
         let drain = tokio::spawn(async move {
             while let Some(message) = merged.next().await {
                 if drain_weak.strong_count() == 0 {
                     return;
                 }
-                if tx.send(message).is_err() {
-                    return;
+                match tx.try_send(message) {
+                    Ok(()) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                        if !drain_lagged.swap(true, Ordering::AcqRel) {
+                            tracing::warn!(
+                                capacity = SIGNAL_QUEUE_CAPACITY,
+                                "iwd signal queue full; scheduling full resync"
+                            );
+                        }
+                        drain_wake.notify_one();
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
                 }
             }
+            tracing::warn!("iwd signal stream ended");
         });
         let worker_weak = Arc::downgrade(&self.inner);
         let worker = tokio::spawn(async move {
-            while let Some(message) = rx.recv().await {
+            loop {
+                let next = tokio::select! {
+                    biased;
+                    () = lag_wake.notified(), if lagged.load(Ordering::Acquire) => {
+                        let Some(inner) = worker_weak.upgrade() else {
+                            return;
+                        };
+                        if lagged.swap(false, Ordering::AcqRel) {
+                            let this = Self { inner };
+                            if let Err(error) = this.attach().await {
+                                tracing::warn!(%error, "iwd resync after signal lag failed");
+                            }
+                        }
+                        continue;
+                    }
+                    message = rx.recv() => message,
+                };
+                let Some(message) = next else {
+                    return;
+                };
                 let Some(inner) = worker_weak.upgrade() else {
                     return;
                 };
-                if let Ok(message) = message {
-                    let this = Self { inner };
-                    this.dispatch(&message).await;
+                let this = Self { inner };
+                match message {
+                    Ok(message) => this.dispatch(&message).await,
+                    Err(error) => tracing::warn!(%error, "malformed iwd signal"),
+                }
+                if lagged.swap(false, Ordering::AcqRel)
+                    && let Err(error) = this.attach().await
+                {
+                    tracing::warn!(%error, "iwd resync after signal lag failed");
                 }
             }
         });

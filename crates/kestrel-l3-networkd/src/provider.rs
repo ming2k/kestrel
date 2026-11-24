@@ -94,25 +94,61 @@ impl Networkd {
             events: EventBus::new(),
             monitor_tasks: Mutex::new(Vec::new()),
         });
-        let rule = zbus::MatchRule::builder()
-            .msg_type(Type::Signal)
-            .sender(SERVICE)
-            .interface("org.freedesktop.DBus.Properties")
-            .member("PropertiesChanged")
-            .path_namespace(LINK_NAMESPACE)
-            .build()
-            .map_err(dbus_error)?;
-        let stream = zbus::MessageStream::for_match_rule(rule, &inner.connection, None)
-            .await
-            .map_err(dbus_error)?;
+        let rules = [
+            zbus::MatchRule::builder()
+                .msg_type(Type::Signal)
+                .sender(SERVICE)
+                .interface("org.freedesktop.DBus.Properties")
+                .member("PropertiesChanged")
+                .path_namespace(LINK_NAMESPACE)
+                .build()
+                .map_err(dbus_error)?,
+            zbus::MatchRule::builder()
+                .msg_type(Type::Signal)
+                .sender("org.freedesktop.DBus")
+                .interface("org.freedesktop.DBus")
+                .member("NameOwnerChanged")
+                .arg(0, SERVICE)
+                .build()
+                .map_err(dbus_error)?,
+        ];
+        let mut streams = Vec::with_capacity(rules.len());
+        for rule in rules {
+            streams.push(
+                zbus::MessageStream::for_match_rule(rule, &inner.connection, None)
+                    .await
+                    .map_err(dbus_error)?,
+            );
+        }
+        let mut merged = futures_util::stream::select_all(streams);
         let wake = Arc::new(tokio::sync::Notify::new());
         let drain_weak = Arc::downgrade(&inner);
         let drain_wake = Arc::clone(&wake);
         let drain = tokio::spawn(async move {
-            let mut stream = stream;
-            while stream.next().await.is_some() {
-                if drain_weak.strong_count() == 0 {
+            while let Some(message) = merged.next().await {
+                let Some(inner) = drain_weak.upgrade() else {
                     return;
+                };
+                if let Ok(message) = message {
+                    let header = message.header();
+                    if header.interface().map(zbus::names::InterfaceName::as_str)
+                        == Some("org.freedesktop.DBus")
+                        && header.member().map(zbus::names::MemberName::as_str)
+                            == Some("NameOwnerChanged")
+                        && let Ok((name, old_owner, new_owner)) =
+                            message.body().deserialize::<(String, String, String)>()
+                    {
+                        if name != SERVICE {
+                            continue;
+                        }
+                        if !old_owner.is_empty() {
+                            tracing::warn!("systemd-networkd left the bus");
+                            inner.last_lock().clear();
+                        }
+                        if !new_owner.is_empty() {
+                            tracing::info!("systemd-networkd appeared on the bus");
+                        }
+                    }
                 }
                 drain_wake.notify_one();
             }

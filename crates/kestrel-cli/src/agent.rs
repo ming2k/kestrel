@@ -13,6 +13,8 @@ use tokio::sync::Mutex;
 use zbus::OwnedObjectPath;
 use zbus::message::Type;
 
+use crate::common::{CliError, CliResult};
+
 const AGENT_PATH: &str = "/com/hihusky/Kestrel/cli/agent";
 
 #[derive(Debug, zbus::DBusError)]
@@ -32,8 +34,8 @@ async fn ask(prompt: String, secret: bool) -> Option<String> {
         if secret {
             rpassword::prompt_password(prompt).ok()
         } else {
-            print!("{prompt}");
-            let _ = std::io::stdout().flush();
+            eprint!("{prompt}");
+            let _ = std::io::stderr().flush();
             let mut line = String::new();
             std::io::stdin().lock().read_line(&mut line).ok()?;
             Some(line.trim().to_owned())
@@ -58,7 +60,7 @@ impl TerminalAgent {
     ) -> Result<String, AgentError> {
         let _ = (device, profile);
         let _guard = self.prompt_lock.lock().await;
-        println!("\nNetwork {ssid:?} ({security}) needs a passphrase ({reason}).");
+        eprintln!("\nNetwork {ssid:?} ({security}) needs a passphrase ({reason}).");
         match ask("Passphrase (empty to decline): ".into(), true).await {
             Some(secret) if !secret.is_empty() => Ok(secret),
             _ => Err(AgentError::Declined("declined at the terminal".into())),
@@ -74,7 +76,7 @@ impl TerminalAgent {
     ) -> Result<(String, String), AgentError> {
         let _ = device;
         let _guard = self.prompt_lock.lock().await;
-        println!("\nWi-Fi Direct request from {name:?} ({peer}), method {method}.");
+        eprintln!("\nWi-Fi Direct request from {name:?} ({peer}), method {method}.");
         if method == "pbc" {
             return match ask("Accept? [y/N] ".into(), false).await.as_deref() {
                 Some("y" | "Y" | "yes") => Ok(("pbc".into(), String::new())),
@@ -96,16 +98,18 @@ impl TerminalAgent {
 
     #[allow(clippy::unused_self)]
     fn display_pin(&self, session: OwnedObjectPath, peer: String, pin: String) {
-        println!(
-            "\nEnter PIN {pin} on {peer} (session {}).",
-            session.as_str()
-        );
+        let id = session
+            .as_str()
+            .rsplit('/')
+            .next()
+            .unwrap_or(session.as_str());
+        eprintln!("\nEnter PIN {pin} on {peer} (session {id}).");
     }
 }
 
-pub(crate) async fn run(client: &Client) -> zbus::Result<()> {
+pub(crate) async fn run(client: &Client) -> CliResult<()> {
     if !std::io::stdin().is_terminal() {
-        return Err(zbus::Error::Failure("the agent needs a terminal".into()));
+        return Err(CliError::runtime("the agent needs a terminal"));
     }
     let connection = client.connection();
     let rule = zbus::MatchRule::builder()
@@ -116,15 +120,21 @@ pub(crate) async fn run(client: &Client) -> zbus::Result<()> {
         .arg(0, BUS_NAME)
         .build()?;
     let mut owner_changes = zbus::MessageStream::for_match_rule(rule, connection, None).await?;
-    let (reregister_tx, mut reregister_rx) = tokio::sync::mpsc::unbounded_channel();
+    let (reregister_tx, mut reregister_rx) = tokio::sync::mpsc::channel(16);
     let drain = tokio::spawn(async move {
-        while let Some(Ok(message)) = owner_changes.next().await {
+        while let Some(item) = owner_changes.next().await {
+            let Ok(message) = item else {
+                continue;
+            };
             let Ok((name, _old, new)) = message.body().deserialize::<(String, String, String)>()
             else {
                 continue;
             };
-            if name == BUS_NAME && !new.is_empty() && reregister_tx.send(()).is_err() {
-                return;
+            if name == BUS_NAME && !new.is_empty() {
+                match reregister_tx.try_send(()) {
+                    Ok(()) | Err(tokio::sync::mpsc::error::TrySendError::Full(())) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(())) => return,
+                }
             }
         }
     });
@@ -141,7 +151,7 @@ pub(crate) async fn run(client: &Client) -> zbus::Result<()> {
     let path = zbus::ObjectPath::try_from(AGENT_PATH)?;
     let manager = client.manager().await?;
     manager.register_agent(&path).await?;
-    println!("agent registered; press Ctrl-C to stop");
+    eprintln!("agent registered; press Ctrl-C to stop");
 
     loop {
         tokio::select! {
@@ -151,7 +161,7 @@ pub(crate) async fn run(client: &Client) -> zbus::Result<()> {
                     break;
                 }
                 match manager.register_agent(&path).await {
-                    Ok(()) => println!("kestrel-daemon restarted; agent re-registered"),
+                    Ok(()) => eprintln!("kestrel-daemon restarted; agent re-registered"),
                     Err(error) => eprintln!("kestrel: failed to re-register agent: {error}"),
                 }
             }

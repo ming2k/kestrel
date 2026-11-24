@@ -68,12 +68,12 @@ Remove the override with `sudo systemctl revert kestrel && sudo systemctl restar
 - **Cause 3: Hardware rfkill switch is blocking Wi-Fi.**
   - **Fix:** Check `rfkill list` and `kestrel status` (which prints `(rfkill: hard-blocked)`). Toggle the physical switch or firmware key, or unblock soft rfkill with `rfkill unblock wifi`.
 
-### `kestrel wifi status` shows `idle` / `offline` even though Wi-Fi is already connected
+### `kestrel status <iface>` shows `idle` / `offline` even though Wi-Fi is already connected
 
 - **Cause 1: The connection was established outside Kestrel.** Kestrel only reports state for connections it orchestrates; it does not import `/etc/wpa_supplicant/wpa_supplicant.conf` or adopt external connections.
-  - **Fix:** Confirm `kestrel profile list` and join through Kestrel (`kestrel wifi join <iface> "<SSID>"`).
+  - **Fix:** Confirm `kestrel profile list` and connect through Kestrel (`kestrel wifi connect "<SSID>"`).
 - **Cause 2: A second manual `wpa_supplicant` process is running alongside `wpa_supplicant.service`.** Look for processes like `wpa_supplicant -B -i <iface> -c /etc/wpa_supplicant/wpa_supplicant.conf` via `ps -ef | grep wpa_supplicant`. Running two supplicants on the same interface causes `nl80211: kernel reports: Match already configured` and breaks P2P/association.
-  - **Fix:** Stop the manual process, ensure only `wpa_supplicant.service` (`wpa_supplicant -u`) is running, restart `kestrel`, and reconnect with `kestrel wifi join`.
+  - **Fix:** Stop the manual process, ensure only `wpa_supplicant.service` (`wpa_supplicant -u`) is running, restart `kestrel`, and reconnect with `kestrel wifi connect`.
 
 ### `AccessDenied` when running `kestrel`
 
@@ -96,7 +96,7 @@ Remove the override with `sudo systemctl revert kestrel && sudo systemctl restar
 
 ### `Busy` when starting a hotspot, P2P session, agent, or deleting a certificate
 
-- **Hotspot vs. P2P:** A single wireless device cannot run a SoftAP hotspot and a Wi-Fi Direct session concurrently. Stop the active hotspot (`kestrel hotspot stop <dev>`) or close the active P2P session (`kestrel p2p close <session>`) first.
+- **Hotspot vs. P2P:** A single wireless device cannot run a SoftAP hotspot and a Wi-Fi Direct session concurrently. Stop the active hotspot (`kestrel hotspot stop`) or close the active P2P session (`kestrel p2p session close <id>`) first.
 - **Agent registration:** Only one D-Bus agent (`kestrel agent` or a desktop shell agent) may be registered at a time.
 - **Certificate deletion:** A certificate cannot be deleted while any saved profile references it. Check `kestrel profile list` / `kestrel profile show <profile>` and re-point or delete referencing profiles first.
 
@@ -126,8 +126,8 @@ Remove the override with `sudo systemctl revert kestrel && sudo systemctl restar
 
 ### Wi-Fi stays off after reboot
 
-- **Cause:** `kestrel wifi off` persists `WirelessEnabled = false` in `/var/lib/kestrel/state.toml`.
-- **Fix:** Run `kestrel wifi on`.
+- **Cause:** `kestrel radio off` persists `WirelessEnabled = false` in `/var/lib/kestrel/state.toml`.
+- **Fix:** Run `kestrel radio on`.
 
 ### Checking for Leftover State After a Crash
 
@@ -135,6 +135,6 @@ After a daemon crash or `kill -9`, restarting `kestrel` automatically runs `swee
 
 ```sh
 ls /run/systemd/network/10-kestrel-* 2>/dev/null || echo "clean"
-kestrel p2p sessions
+kestrel p2p session list
 kestrel hotspot status
 ```

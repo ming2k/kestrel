@@ -54,7 +54,7 @@ fn device_state(lab: &Lab, device: &str) -> String {
 }
 
 fn sessions(lab: &Lab) -> Vec<Value> {
-    ctl(lab, &["p2p", "sessions"], None)
+    ctl(lab, &["p2p", "session", "list"], None)
         .ok()
         .and_then(|v| v.as_array().cloned())
         .unwrap_or_default()
@@ -129,7 +129,6 @@ fn wrong_password_marks_needs_secrets_and_recovers_after_edit() {
         &[
             "profile",
             "add",
-            "--ssid",
             "lab-home",
             "--security",
             "wpa-personal",
@@ -145,7 +144,7 @@ fn wrong_password_marks_needs_secrets_and_recovers_after_edit() {
         "failed attempt recorded in history",
         Duration::from_secs(20),
         || {
-            ctl(lab, &["wifi", "history", "--limit", "10"], None)
+            ctl(lab, &["wifi", "history", "-n", "10"], None)
                 .ok()
                 .and_then(|h| {
                     h.as_array().map(|arr| {
@@ -172,7 +171,7 @@ fn wrong_password_marks_needs_secrets_and_recovers_after_edit() {
     let shown = ctl(lab, &["profile", "show", id], None).expect("profile show");
     assert_eq!(shown["has_secret"], true);
 
-    ctl(lab, &["wifi", "connect", "wlan0", id, "--no-wait"], None).expect("wifi connect");
+    ctl(lab, &["wifi", "connect", id, "--no-wait"], None).expect("wifi connect");
     wait_for(
         "wlan0 connected after secret fix",
         Duration::from_secs(30),
@@ -197,14 +196,12 @@ fn profile_crud_and_scan_all_work_end_to_end() {
         &[
             "profile",
             "add",
-            "--ssid",
             "lab-guest",
             "--security",
             "open",
             "--priority",
             "5",
-            "--autoconnect",
-            "false",
+            "--no-autoconnect",
         ],
         None,
     )
@@ -231,7 +228,7 @@ fn profile_crud_and_scan_all_work_end_to_end() {
     assert_eq!(shown["name"], "Guest Network");
     assert_eq!(shown["autoconnect"], false);
 
-    let scan_all = ctl(lab, &["wifi", "scan", "wlan0", "--all"], None).expect("wifi scan --all");
+    let scan_all = ctl(lab, &["wifi", "scan", "--all"], None).expect("wifi scan --all");
     assert!(
         scan_all
             .as_array()
@@ -239,10 +236,11 @@ fn profile_crud_and_scan_all_work_end_to_end() {
             .iter()
             .any(|bss| bss["ssid"] == "lab-home")
     );
-    let list_all = ctl(lab, &["wifi", "list", "wlan0", "--all"], None).expect("wifi list --all");
-    assert_ne!(list_all.as_array().expect("array").len(), 0);
+    let cached_all =
+        ctl(lab, &["wifi", "scan", "--cached", "--all"], None).expect("wifi scan --cached --all");
+    assert_ne!(cached_all.as_array().expect("array").len(), 0);
 
-    ctl(lab, &["profile", "delete", &id, "--yes"], None).expect("profile delete");
+    ctl(lab, &["profile", "delete", &id, "-y"], None).expect("profile delete");
     let profiles = ctl(lab, &["profile", "list"], None).expect("profile list");
     assert!(
         !profiles
@@ -270,14 +268,15 @@ fn p2p_pin_connect_and_missing_session_close() {
         &[
             "p2p",
             "connect",
-            "wlan0",
             "02:00:00:00:aa:55",
             "--pin-stdin",
+            "--no-wait",
         ],
         Some("12345670\n"),
     )
     .expect("p2p connect");
-    let session = created["session"].as_str().expect("session").to_owned();
+    let session_id = created["id"].as_str().expect("id").to_owned();
+    let session_path = created["path"].as_str().expect("path").to_owned();
 
     wait_for("pin connect issued", Duration::from_secs(10), || {
         fake_calls(lab)
@@ -289,15 +288,15 @@ fn p2p_pin_connect_and_missing_session_close() {
     wait_for("p2p session ready", Duration::from_secs(20), || {
         sessions(lab)
             .iter()
-            .any(|s| s["path"] == session && s["state"] == "ready")
+            .any(|s| s["path"] == session_path && s["state"] == "ready")
     });
 
-    ctl(lab, &["p2p", "close", &session], None).expect("p2p close");
+    ctl(lab, &["p2p", "session", "close", &session_id], None).expect("p2p session close");
     wait_for("session removed", Duration::from_secs(10), || {
         sessions(lab).is_empty()
     });
 
     // Closing a non-existent session should fail cleanly.
-    let err = ctl(lab, &["p2p", "close", "999999"], None).unwrap_err();
+    let err = ctl(lab, &["p2p", "session", "close", "999999"], None).unwrap_err();
     assert_ne!(err, "");
 }

@@ -206,7 +206,13 @@ impl AgentSlot {
 }
 
 /// Drops the agent when its owner disconnects from the bus.
-pub(crate) async fn watch_owner(shared: Shared) -> Result<tokio::task::JoinHandle<()>, ApiError> {
+///
+/// Uses a non-blocking bounded drain/worker split so transient stream errors
+/// never terminate monitoring and bursts of `NameOwnerChanged` signals cannot
+/// stall `zbus`'s socket reader or grow memory without bound.
+pub(crate) async fn watch_owner(shared: Shared) -> Result<Vec<tokio::task::AbortHandle>, ApiError> {
+    const QUEUE_CAPACITY: usize = 256;
+
     let rule = zbus::MatchRule::builder()
         .msg_type(Type::Signal)
         .sender("org.freedesktop.DBus")
@@ -214,17 +220,37 @@ pub(crate) async fn watch_owner(shared: Shared) -> Result<tokio::task::JoinHandl
         .member("NameOwnerChanged")
         .build()?;
     let mut stream = zbus::MessageStream::for_match_rule(rule, &shared.connection, None).await?;
-    let handle = tokio::spawn(async move {
-        while let Some(Ok(message)) = stream.next().await {
+    let (tx, mut rx) = tokio::sync::mpsc::channel::<String>(QUEUE_CAPACITY);
+    let drain_agent = shared.agent.clone();
+    let drain = tokio::spawn(async move {
+        while let Some(item) = stream.next().await {
+            let message = match item {
+                Ok(message) => message,
+                Err(error) => {
+                    tracing::debug!(%error, "ignoring malformed NameOwnerChanged signal");
+                    continue;
+                }
+            };
             let Ok((name, _old, new)) = message.body().deserialize::<(String, String, String)>()
             else {
                 continue;
             };
-            if new.is_empty() && shared.agent.remove_if_owner(&name) {
-                tracing::info!(owner = %name, "agent owner left the bus");
-                let _ = shared.controller.radio().set_agent(None).await;
+            if new.is_empty() && drain_agent.remove_if_owner(&name) {
+                match tx.try_send(name) {
+                    Ok(()) => {}
+                    Err(tokio::sync::mpsc::error::TrySendError::Full(owner)) => {
+                        tracing::warn!(%owner, "agent disconnect queue full");
+                    }
+                    Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
+                }
             }
         }
     });
-    Ok(handle)
+    let worker = tokio::spawn(async move {
+        while let Some(owner) = rx.recv().await {
+            tracing::info!(%owner, "agent owner left the bus");
+            let _ = shared.controller.radio().set_agent(None).await;
+        }
+    });
+    Ok(vec![drain.abort_handle(), worker.abort_handle()])
 }

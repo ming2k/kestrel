@@ -4,13 +4,16 @@
 //!
 //! Signal reception is strictly decoupled from async D-Bus RPC dispatch:
 //! a non-blocking drain task pulls messages off `zbus::MessageStream`s and
-//! enqueues them into an unbounded channel, while a dedicated worker task
-//! processes them in arrival order. This prevents `zbus`'s socket reader
-//! from ever deadlocking when a signal burst arrives during RPC work such
-//! as reading scan results.
+//! enqueues them with non-blocking `try_send` into a bounded channel, while a
+//! dedicated worker task processes them in arrival order. This prevents both
+//! `zbus`'s socket reader from deadlocking during RPC work (ADR-0009) and
+//! unbounded queue growth under pathological signal floods (ADR-0011): if the
+//! bounded queue ever saturates, the drain sets an atomic lag flag and the
+//! worker performs a full `discover()` resync.
 
 use std::collections::HashMap;
-use std::sync::Weak;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Weak};
 
 use futures_util::StreamExt;
 use kestrel_model::{InterfaceName, MacAddress, P2pRole, Secret, Ssid};
@@ -18,7 +21,7 @@ use kestrel_ports::PortResult;
 use kestrel_ports::ap::ApEvent;
 use kestrel_ports::p2p::{P2pEvent, RequestedMethod};
 use kestrel_ports::wlan::WlanEvent;
-use tokio::sync::mpsc;
+use tokio::sync::{Notify, mpsc};
 use tokio::task::AbortHandle;
 use zbus::message::Type;
 use zbus::{OwnedObjectPath, OwnedVariant as OwnedValue};
@@ -31,19 +34,17 @@ use crate::{
 const PROPERTIES: &str = "org.freedesktop.DBus.Properties";
 const WPS: &str = "fi.w1.wpa_supplicant1.Interface.WPS";
 const PERSISTENT_GROUP: &str = "fi.w1.wpa_supplicant1.PersistentGroup";
+const SIGNAL_QUEUE_CAPACITY: usize = 2048;
 
 type Dict = HashMap<String, OwnedValue>;
 
-pub(crate) async fn start(
-    inner: Weak<Inner>,
-    connection: zbus::Connection,
-) -> PortResult<Vec<AbortHandle>> {
+fn match_rules() -> PortResult<[zbus::MatchRule<'static>; 6]> {
     // Explicit, interface-scoped match rules:
     // - excludes noisy `fi.w1.wpa_supplicant1.BSS` beacon/signal churn at the
     //   bus daemon;
     // - avoids unfiltered well-known sender rules, which `zbus` treats as
     //   client-side wildcards across all streams on the shared connection.
-    let rules = [
+    Ok([
         zbus::MatchRule::builder()
             .msg_type(Type::Signal)
             .sender("org.freedesktop.DBus")
@@ -88,7 +89,14 @@ pub(crate) async fn start(
             .path_namespace(MAIN_PATH)
             .build()
             .map_err(dbus_error)?,
-    ];
+    ])
+}
+
+pub(crate) async fn start(
+    inner: Weak<Inner>,
+    connection: zbus::Connection,
+) -> PortResult<Vec<AbortHandle>> {
+    let rules = match_rules()?;
 
     let mut streams = Vec::with_capacity(rules.len());
     for rule in rules {
@@ -100,22 +108,55 @@ pub(crate) async fn start(
     }
     let mut merged = futures_util::stream::select_all(streams);
 
-    let (tx, mut rx) = mpsc::unbounded_channel();
+    let (tx, mut rx) = mpsc::channel(SIGNAL_QUEUE_CAPACITY);
+    let lagged = Arc::new(AtomicBool::new(false));
+    let lag_wake = Arc::new(Notify::new());
     let drain_weak = inner.clone();
+    let drain_lagged = Arc::clone(&lagged);
+    let drain_wake = Arc::clone(&lag_wake);
     let drain = tokio::spawn(async move {
         while let Some(message) = merged.next().await {
             if drain_weak.strong_count() == 0 {
                 return;
             }
-            if tx.send(message).is_err() {
-                return;
+            match tx.try_send(message) {
+                Ok(()) => {}
+                Err(mpsc::error::TrySendError::Full(_)) => {
+                    if !drain_lagged.swap(true, Ordering::AcqRel) {
+                        tracing::warn!(
+                            capacity = SIGNAL_QUEUE_CAPACITY,
+                            "wpa_supplicant signal queue full; scheduling full resync"
+                        );
+                    }
+                    drain_wake.notify_one();
+                }
+                Err(mpsc::error::TrySendError::Closed(_)) => return,
             }
         }
         tracing::warn!("wpa_supplicant signal stream ended");
     });
 
     let worker = tokio::spawn(async move {
-        while let Some(message) = rx.recv().await {
+        loop {
+            let next = tokio::select! {
+                biased;
+                () = lag_wake.notified(), if lagged.load(Ordering::Acquire) => {
+                    let Some(inner) = inner.upgrade() else {
+                        return;
+                    };
+                    if lagged.swap(false, Ordering::AcqRel) {
+                        let wpa = WpaSupplicant { inner };
+                        if let Err(error) = wpa.discover().await {
+                            tracing::warn!(%error, "wpa_supplicant resync after signal lag failed");
+                        }
+                    }
+                    continue;
+                }
+                message = rx.recv() => message,
+            };
+            let Some(message) = next else {
+                return;
+            };
             let Some(inner) = inner.upgrade() else {
                 return;
             };
@@ -123,6 +164,11 @@ pub(crate) async fn start(
             match message {
                 Ok(message) => dispatch(&wpa, &message).await,
                 Err(error) => tracing::warn!(%error, "malformed wpa_supplicant signal"),
+            }
+            if lagged.swap(false, Ordering::AcqRel)
+                && let Err(error) = wpa.discover().await
+            {
+                tracing::warn!(%error, "wpa_supplicant resync after signal lag failed");
             }
         }
     });

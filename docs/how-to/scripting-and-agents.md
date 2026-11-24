@@ -4,9 +4,9 @@ This guide covers automating Kestrel from scripts, streaming live D-Bus state ch
 
 ---
 
-## 1. Machine-Readable Output (`--json` and `monitor`)
+## 1. Machine-Readable Output (`--json`, `monitor`, and Exit Codes)
 
-The global `--json` flag emits structured JSON across `status`, `monitor`, `wifi`, `profile`, `certificate`, `p2p`, and `hotspot` commands:
+The global `--json` flag emits structured JSON across `status`, `radio`, `monitor`, `wifi`, `profile`, `certificate`, `p2p`, and `hotspot` commands:
 
 ```sh
 # Query active interface states and IP addresses
@@ -18,41 +18,47 @@ kestrel --json monitor
 
 > `kestrel status --watch` cannot be combined with `--json`. Use `kestrel --json monitor` for reactive updates without polling.
 
-All `kestrel` subcommands exit `0` on success and `1` on error, printing stable D-Bus error short names (such as `AccessDenied`, `Busy`, `NotSupported`, `InvalidArgument`) to `stderr`.
+Data and JSON always go to `stdout`; prompts, scan progress, empty-list notices, and errors go to `stderr`. Semantic exit codes are:
+
+- `0`: success
+- `1`: runtime, validation, authorization, or D-Bus error (with stable D-Bus short names such as `AccessDenied`, `Busy`, `NotSupported`, `InvalidArgument` on `stderr`)
+- `2`: CLI argument usage error
+- `124`: wait timeout elapsed
+- `130`: interrupted by `Ctrl-C` while waiting
 
 ---
 
 ## 2. Non-Interactive Workflows
 
-Kestrel never accepts passphrases, WPS PINs, or private key passphrases in command-line arguments (`argv`), preventing exposure in `/proc/<pid>/cmdline`. Use standard input flags and `--yes` / `--no-wait` in scripts:
+Kestrel never accepts passphrases, WPS PINs, or private key passphrases in command-line arguments (`argv`), preventing exposure in `/proc/<pid>/cmdline`. Use standard input flags and `-y` / `--no-wait` in scripts. On multi-radio hosts, pass `-d <iface>` (or export `KESTREL_DEVICE=<iface>`):
 
 ```sh
 # Create a Wi-Fi profile without prompting
-printf '%s\n' "$WIFI_PSK" | kestrel --json profile add \
-  --ssid "OfficeNet" \
+printf '%s\n' "$WIFI_PSK" | kestrel --json profile add "OfficeNet" \
   --security wpa-personal \
   --secret-stdin
 
-# Join and return immediately instead of waiting for L3
-printf '%s\n' "$WIFI_PSK" | kestrel wifi join wlp0s20f3 "OfficeNet" \
+# Connect and return immediately instead of waiting for L3
+printf '%s\n' "$WIFI_PSK" | kestrel wifi connect "OfficeNet" \
+  -d wlp0s20f3 \
   --secret-stdin \
   --no-wait
 
-# Start a hotspot non-interactively
-printf '%s\n' "$AP_PSK" | kestrel --json hotspot start wlp0s20f3 \
-  --ssid "kestrel-ap" \
+# Start a hotspot non-interactively and wait until active
+printf '%s\n' "$AP_PSK" | kestrel --json hotspot start "kestrel-ap" \
+  -d wlp0s20f3 \
   --secret-stdin
 
 # Connect to a P2P peer using a WPS keypad PIN from stdin
-printf '%s\n' "$PEER_PIN" | kestrel p2p connect wlp0s20f3 02:11:22:33:44:55 \
+printf '%s\n' "$PEER_PIN" | kestrel p2p connect 02:11:22:33:44:55 \
+  -d wlp0s20f3 \
   --pin-stdin \
-  --wait \
-  --timeout 90
+  -t 90
 
 # Delete profiles, certificates, or P2P groups without confirmation prompts
-kestrel profile delete "OfficeNet" --yes
-kestrel certificate delete "Corp CA" --yes
-kestrel p2p groups delete <group> --yes
+kestrel profile delete "OfficeNet" -y
+kestrel certificate delete "Corp CA" -y
+kestrel p2p group delete <group> -y
 ```
 
 Each stdin secret flag reads only the first line of standard input and strips the trailing newline.
@@ -65,7 +71,7 @@ Some events happen asynchronously while you are not actively running a `kestrel`
 
 - A saved profile fails authentication (`auth-failed`) or its sealed credential was quarantined (`secrets-required`), and Kestrel needs a replacement passphrase.
 - A remote Wi-Fi Direct peer initiates an incoming P2P connection (`AuthorizePeer`).
-- A P2P connection using `--display` generates a WPS PIN that must be shown to the user (`DisplayPin`).
+- A P2P connection using `--wps display` generates a WPS PIN that must be shown to the user (`DisplayPin`).
 
 Run the terminal agent in a dedicated TTY:
 
@@ -84,14 +90,14 @@ Key behaviors of `kestrel agent`:
 
 ## 4. Polkit Authorization and Custom Rules
 
-Read operations (such as `status`, `wifi status`, `wifi list`, `wifi history`, `profile list`, `p2p peers`, `hotspot status`) are unrestricted. Mutating methods check one of five polkit actions defined in `data/com.hihusky.kestrel.policy`:
+Read operations (such as `status`, `radio`, `wifi scan --cached`, `wifi autoconnect`, `wifi history`, `profile list`, `p2p peer list`, `p2p session list`, `hotspot status`) are unrestricted. Mutating methods check one of five polkit actions defined in `data/com.hihusky.kestrel.policy`:
 
 | Polkit Action | Operations | Active Local Session | Inactive / Remote Session |
 | :--- | :--- | :--- | :--- |
-| `com.hihusky.kestrel.connect` | Scan, connect, disconnect, autoconnect, P2P discovery/sessions/WFD | `yes` | `auth_admin_keep` |
+| `com.hihusky.kestrel.connect` | Active scan, connect, disconnect, autoconnect mutation, P2P discovery/sessions/WFD | `yes` | `auth_admin_keep` |
 | `com.hihusky.kestrel.hotspot` | Start and stop SoftAP hotspots | `yes` | `auth_admin_keep` |
 | `com.hihusky.kestrel.modify-profiles` | Add/edit/delete profiles, import/delete certificates, delete persistent P2P groups | `yes` | `auth_admin_keep` |
-| `com.hihusky.kestrel.toggle-wireless` | `wifi on`, `wifi off` | `yes` | `auth_admin_keep` |
+| `com.hihusky.kestrel.toggle-wireless` | `radio on`, `radio off` | `yes` | `auth_admin_keep` |
 | `com.hihusky.kestrel.register-agent` | `kestrel agent` / desktop agent registration | `yes` | `auth_admin_keep` |
 
 Root is always authorized by polkit. When `kestrel` runs on the system bus, it checks polkit authorization **before** prompting for a Wi-Fi passphrase, WPS PIN, or delete confirmation, and automatically spawns `pkttyagent --fallback` on interactive terminals if no desktop polkit agent is running.

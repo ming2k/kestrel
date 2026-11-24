@@ -1,41 +1,42 @@
 # Wi-Fi and Network Profiles
 
-This guide covers everyday wireless station tasks: inspecting devices, scanning, joining networks, managing saved profiles, configuring L3 addressing and DNS, controlling autoconnect, and rotating passphrases.
+This guide covers everyday wireless station tasks: inspecting devices, scanning, connecting to new or saved networks, managing profiles, configuring L3 addressing and DNS, controlling autoconnect, and rotating passphrases.
 
 For 802.1X / WPA-Enterprise profiles and certificates, see [802.1X Enterprise Wi-Fi and Certificates](enterprise-8021x.md).
+
+> On hosts with a single wireless adapter, `kestrel` selects it automatically. On multi-radio hosts, pass `-d <iface>` (or export `KESTREL_DEVICE=<iface>`).
 
 ---
 
 ## 1. Inspect Devices and Scan
 
-Show an overview of every wireless device (add `--watch` to refresh once per second):
+Show an overview of every wireless device, or detailed status for a single device (both support `-w` / `--watch` to refresh once per second):
 
 ```sh
 kestrel status
-kestrel status --watch
+kestrel status -w
+kestrel status wlp0s20f3
+kestrel status wlp0s20f3 -w
 ```
 
-Inspect one device in detail (omit `<device>` to inspect the first wireless device):
+Trigger an active scan, or display the cached scan results without rescanning (`--cached`). Pass `-a` / `--all` to show every individual BSS instead of the strongest BSS per SSID:
 
 ```sh
-kestrel wifi status wlp0s20f3
-```
-
-Trigger an active scan or display the cached scan results without rescanning. Pass `--all` to show every individual BSS instead of the strongest BSS per SSID:
-
-```sh
-kestrel wifi scan wlp0s20f3
-kestrel wifi list wlp0s20f3 --all
+kestrel wifi scan
+kestrel wifi scan --cached --all
 ```
 
 ---
 
-## 2. Join a Wi-Fi Network
+## 2. Connect to a Wi-Fi Network
 
-`wifi join` scans for the SSID, infers the security mode, prompts for a passphrase (without echoing it), saves or updates the profile, connects, and waits up to 30 seconds for `connected`:
+`kestrel wifi connect <target>` handles both saved profiles and new networks:
+
+- If `<target>` matches a unique saved profile (by UUID, 8+ character prefix, name, or SSID), Kestrel connects to it directly.
+- Otherwise, Kestrel treats `<target>` as a new SSID, scans to infer the security mode, prompts for a passphrase (without echoing it), saves a profile, connects, and waits up to 30 seconds for `connected`:
 
 ```sh
-kestrel wifi join wlp0s20f3 "HomeWiFi"
+kestrel wifi connect "HomeWiFi"
 ```
 
 Useful options:
@@ -43,64 +44,60 @@ Useful options:
 - **Hidden network**: pass `--hidden` and specify `--security` explicitly (`open`, `owe`, `wpa-personal`, or `wpa3-personal`):
 
   ```sh
-  kestrel wifi join wlp0s20f3 "HiddenNet" --hidden --security wpa3-personal
+  kestrel wifi connect "HiddenNet" --hidden --security wpa3-personal
   ```
 
 - **Custom label and priority**:
 
   ```sh
-  kestrel wifi join wlp0s20f3 "HomeWiFi" --name "Home 5GHz" --priority 50
+  kestrel wifi connect "HomeWiFi" --name "Home 5GHz" --priority 50
   ```
 
 - **Return immediately without waiting for IP**:
 
   ```sh
-  kestrel wifi join wlp0s20f3 "HomeWiFi" --no-wait
+  kestrel wifi connect "HomeWiFi" --no-wait
   ```
 
 - **Force a new passphrase prompt** (even if a secret is already stored):
 
   ```sh
-  kestrel wifi join wlp0s20f3 "HomeWiFi" --ask-secret
+  kestrel wifi connect "HomeWiFi" --ask-secret
   ```
 
 > `wpa3-personal` enforces SAE-only authentication and never downgrades to WPA2. Use `wpa-personal` for WPA2 or WPA2/WPA3 transition networks (and whenever using the `iwd` backend).
 
 ---
 
-## 3. Connect, Disconnect, and Control Autoconnect
+## 3. Disconnect, Autoconnect, Radio, and History
 
-Connect to an existing saved profile by UUID, UUID prefix, profile name, or SSID:
-
-```sh
-kestrel wifi connect wlp0s20f3 "HomeWiFi"
-```
-
-Disconnect from the current network. Disconnecting also holds autoconnect (`AutoconnectHeld = true`) so the radio does not immediately reconnect:
+Disconnect from the current network and wait until the device is idle. Disconnecting also holds autoconnect (`AutoconnectHeld = true`) so the radio does not immediately reconnect:
 
 ```sh
-kestrel wifi disconnect wlp0s20f3
+kestrel wifi disconnect
 ```
 
-Pause or resume autoconnect on a device without changing the current link:
+Query, pause, or resume autoconnect on a device without changing the current link:
 
 ```sh
-kestrel wifi autoconnect wlp0s20f3 off
-kestrel wifi autoconnect wlp0s20f3 on
+kestrel wifi autoconnect
+kestrel wifi autoconnect off
+kestrel wifi autoconnect on
 ```
 
-Toggle software wireless state across all devices (persisted in `/var/lib/kestrel/state.toml` across restarts and reboots):
+Query or toggle the global software radio switch across all devices (persisted in `/var/lib/kestrel/state.toml` across restarts and reboots):
 
 ```sh
-kestrel wifi off
-kestrel wifi on
+kestrel radio
+kestrel radio off
+kestrel radio on
 ```
 
-View recent connection events (newest first, default 20):
+View recent station connection events (newest first, default 20; pass `-d <iface>` to filter to one device):
 
 ```sh
 kestrel wifi history
-kestrel wifi history --limit 50
+kestrel wifi history -n 50 -d wlp0s20f3
 ```
 
 ---
@@ -119,8 +116,7 @@ kestrel profile show "HomeWiFi"
 Create a profile without immediately connecting:
 
 ```sh
-kestrel profile add \
-  --ssid "OfficeGuest" \
+kestrel profile add "OfficeGuest" \
   --security wpa-personal \
   --priority 10 \
   --ask-secret
@@ -129,17 +125,16 @@ kestrel profile add \
 Provide a passphrase non-interactively via stdin (secrets are never passed in `argv`):
 
 ```sh
-printf '%s\n' "$PASSPHRASE" | kestrel profile add \
-  --ssid "OfficeGuest" \
+printf '%s\n' "$PASSPHRASE" | kestrel profile add "OfficeGuest" \
   --security wpa-personal \
   --secret-stdin
 ```
 
-Pin a profile to a specific access point BSSID (pass `--bssid ""` later to unpin):
+Pin a profile to a specific access point BSSID (and unpin later with `--clear-bssid`):
 
 ```sh
 kestrel profile edit "OfficeGuest" --bssid aa:bb:cc:dd:ee:ff
-kestrel profile edit "OfficeGuest" --bssid ""
+kestrel profile edit "OfficeGuest" --clear-bssid
 ```
 
 ---
@@ -152,6 +147,8 @@ Higher integer `--priority` values are preferred during autoconnect (negative va
 kestrel profile edit "HomeWiFi" --priority 100 --autoconnect true
 kestrel profile edit "CoffeeShop" --priority -10 --autoconnect false
 ```
+
+When creating a profile with `profile add`, pass `--no-autoconnect` to disable automatic connections from the start.
 
 ---
 
@@ -171,7 +168,7 @@ kestrel profile edit "HomeWiFi" \
   --domain home.arpa
 ```
 
-Repeat `--address`, `--dns`, or `--domain` for multiple values. Clear configured static DNS servers or search domains with `--clear-dns` or `--clear-domains`.
+Repeat `--address`, `--dns`, or `--domain` for multiple values. Clear configured static gateways, DNS servers, or search domains with `--clear-gateway4`, `--clear-gateway6`, `--clear-dns`, or `--clear-domains`.
 
 ### DHCP (Default) and IPv6 Control
 
@@ -194,7 +191,7 @@ With `--l3 unmanaged`, Kestrel installs no runtime `.network` unit for that conn
 
 ---
 
-## 7. Update, Clear, or Forget Credentials and Profiles
+## 7. Update, Clear, or Delete Credentials and Profiles
 
 Replace or clear a stored passphrase:
 
@@ -205,10 +202,10 @@ kestrel profile edit "HomeWiFi" --clear-secret
 
 Note that changing a profile's `--security` mode automatically clears any kept secret so stale credentials are never reused across security types.
 
-Forget a saved network (disconnects it if active, removes the profile file and its sealed `.cred` file):
+Delete a saved network (disconnects it if active, removes the profile file and its sealed `.cred` file):
 
 ```sh
-kestrel wifi forget "HomeWiFi"
+kestrel profile delete "HomeWiFi"
 # Non-interactive equivalent:
-kestrel profile delete "HomeWiFi" --yes
+kestrel profile delete "HomeWiFi" -y
 ```

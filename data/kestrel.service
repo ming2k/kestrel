@@ -23,6 +23,9 @@ BusName=com.hihusky.Kestrel
 ExecStart=/usr/libexec/kestrel-daemon
 Restart=on-failure
 RestartSec=2s
+# Active liveness watchdog: kestrel-daemon proves both radio-coordinator and
+# D-Bus responsiveness before sending WATCHDOG=1.
+WatchdogSec=30s
 # kestrel-daemon releases every binding and sweeps on SIGTERM.
 TimeoutStopSec=30s
 

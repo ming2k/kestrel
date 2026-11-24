@@ -16,7 +16,7 @@ Wireless daemons on desktop and laptop systems must survive sleep/resume cycles,
 
 Kestrel distinguishes physical radio blocks from the user's software preference:
 - **Hardware rfkill**: `kestrel-daemon` monitors `/sys/class/rfkill` (requiring no Linux capabilities) and exposes `Manager.WirelessHardwareEnabled` over D-Bus. A hardware block suspends station orchestration without overwriting the user's software toggle.
-- **Software toggle**: `Manager.WirelessEnabled` is persisted atomically to `/var/lib/kestrel/state.toml` (`0600`) so `kestrel wifi off` survives daemon restarts and reboots.
+- **Software toggle**: `Manager.WirelessEnabled` is persisted atomically to `/var/lib/kestrel/state.toml` (`0600`) so `kestrel radio off` survives daemon restarts and reboots.
 
 ---
 

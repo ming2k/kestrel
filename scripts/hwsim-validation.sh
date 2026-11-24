@@ -112,38 +112,30 @@ grep -q ' ready' "$ARTIFACTS/kestrel-daemon.log" || {
 CTL="sudo $BIN/kestrel"
 $CTL status | tee "$ARTIFACTS/status-initial.txt"
 
-printf 'hwsim-hotspot-passphrase\n' | $CTL hotspot start "$AP_IF" \
-    --ssid kestrel-hwsim-ap --security wpa-personal --secret-stdin
+printf 'hwsim-hotspot-passphrase\n' | $CTL hotspot start kestrel-hwsim-ap \
+    -d "$AP_IF" --security wpa-personal --secret-stdin
 
-for _ in $(seq 30); do
-    $CTL --json hotspot status "$AP_IF" | grep -q '"state": "active"' && break
-    sleep 0.5
-done
-$CTL hotspot status "$AP_IF" | tee "$ARTIFACTS/hotspot-active.txt"
-$CTL --json hotspot status "$AP_IF" | grep -q '"state": "active"' || {
+$CTL hotspot status -d "$AP_IF" | tee "$ARTIFACTS/hotspot-active.txt"
+$CTL --json hotspot status -d "$AP_IF" | grep -q '"state": "active"' || {
     echo "FAIL: hotspot did not become active" | tee "$ARTIFACTS/result.txt"
     exit 1
 }
 
 echo "== associating station $STA_IF to hotspot on $AP_IF"
-printf 'hwsim-hotspot-passphrase\n' | $CTL wifi join "$STA_IF" kestrel-hwsim-ap \
-    --security wpa-personal --secret-stdin --timeout 30 | tee "$ARTIFACTS/sta-joined.txt"
-$CTL --json wifi status "$STA_IF" | tee "$ARTIFACTS/sta-status.json" | grep -q '"state": "connected"' || {
+printf 'hwsim-hotspot-passphrase\n' | $CTL wifi connect kestrel-hwsim-ap \
+    -d "$STA_IF" --security wpa-personal --secret-stdin -t 30 | tee "$ARTIFACTS/sta-connected.txt"
+$CTL --json status "$STA_IF" | tee "$ARTIFACTS/sta-status.json" | grep -q '"state": "connected"' || {
     echo "FAIL: station did not connect to hwsim hotspot" | tee "$ARTIFACTS/result.txt"
     exit 1
 }
-$CTL --json wifi status "$STA_IF" | grep -q '"192\.168\.49\.' || {
+$CTL --json status "$STA_IF" | grep -q '"192\.168\.49\.' || {
     echo "FAIL: station did not receive a DHCP lease from hwsim hotspot" | tee "$ARTIFACTS/result.txt"
     exit 1
 }
 
-$CTL wifi disconnect "$STA_IF"
-$CTL hotspot stop "$AP_IF"
-for _ in $(seq 30); do
-    $CTL --json hotspot status "$AP_IF" | grep -q '"state": "stopped"' && break
-    sleep 0.5
-done
-$CTL --json hotspot status "$AP_IF" | grep -q '"state": "stopped"' || {
+$CTL wifi disconnect -d "$STA_IF"
+$CTL hotspot stop -d "$AP_IF"
+$CTL --json hotspot status -d "$AP_IF" | grep -q '"state": "stopped"' || {
     echo "FAIL: hotspot did not stop cleanly" | tee "$ARTIFACTS/result.txt"
     exit 1
 }

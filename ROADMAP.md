@@ -1,11 +1,24 @@
 # Roadmap
 
-Last updated: 2026-11-19
+Last updated: 2026-11-23
 
 A milestone is done when its code, tests (unit, property, adapter, API, e2e
 where applicable), and docs are complete. Anything that needs real radios is
 marked **needs hardware** until [the hardware gate](docs/hardware-validation.md)
 has been run with evidence kept.
+
+## v0.0.4: CLI contract overhaul and production daemon supervision (done)
+
+- Strict task-oriented CLI grammar, ambiguity-safe automatic device resolution
+  (`-d/--device` / `KESTREL_DEVICE`), wait-by-default async semantics,
+  `kestrel completions` (installed for bash/zsh/fish by `Makefile`), and
+  semantic exit codes ([ADR-0010](docs/adr/0010-cli-grammar-and-interaction-contract.md)).
+- Production daemon supervision: active-liveness systemd watchdog
+  (`WatchdogSec=30s` probing both `RadioCoordinator` and D-Bus), fail-fast exit
+  on bus/name/sync loss, bounded non-blocking signal drains with lag resync,
+  `systemd-networkd` restart reconciliation, RAII persistent-group suppression
+  guards, concurrent BSS scan reads, and single `pkttyagent` guard reuse
+  ([ADR-0011](docs/adr/0011-daemon-supervision-liveness-watchdog-and-bounded-monitors.md)).
 
 ## v0.0.3: local-seat polkit defaults and CLI authorization preflight (done)
 

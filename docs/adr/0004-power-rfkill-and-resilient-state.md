@@ -29,5 +29,5 @@ In production desktop deployments, four operational edge cases must be handled d
 ## Consequences
 
 - Suspend/resume and hardware airplane-mode transitions are clean, race-free, and preserve user intent (`autoconnect_held` and `WirelessEnabled`).
-- `kestrel wifi off` persists across `kestrel-daemon` restarts and system reboots.
+- `kestrel radio off` persists across `kestrel-daemon` restarts and system reboots.
 - Credential key resets degrade gracefully to a standard password prompt while preserving the quarantined `.cred.invalid` file for audit.

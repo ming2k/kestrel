@@ -18,6 +18,7 @@ const LOGIND_SERVICE: &str = "org.freedesktop.login1";
 const LOGIND_INTERFACE: &str = "org.freedesktop.login1.Manager";
 const LOGIND_PATH: &str = "/org/freedesktop/login1";
 const RFKILL_POLL: Duration = Duration::from_secs(1);
+const SLEEP_QUEUE_CAPACITY: usize = 64;
 
 fn rfkill_dir() -> PathBuf {
     std::env::var_os("KESTREL_RFKILL_DIR")
@@ -107,19 +108,26 @@ pub(crate) async fn watch(
         .ok();
     let initial_inhibitor = acquire_sleep_inhibitor(&connection).await;
 
-    // Drain `PrepareForSleep` on a dedicated non-blocking task so D-Bus RPCs
-    // (such as re-acquiring the sleep inhibitor) never stall `zbus`'s socket
-    // reader.
-    let (sleep_tx, mut sleep_rx) = tokio::sync::mpsc::unbounded_channel();
+    // Drain `PrepareForSleep` on a dedicated non-blocking bounded task so
+    // D-Bus RPCs (such as re-acquiring the sleep inhibitor) never stall
+    // `zbus`'s socket reader and queue memory stays bounded.
+    let (sleep_tx, mut sleep_rx) = tokio::sync::mpsc::channel(SLEEP_QUEUE_CAPACITY);
     let drain_handle = stream.map(|mut s| {
         tokio::spawn(async move {
             while let Some(message) = s.next().await {
                 match message {
                     Ok(msg) => {
-                        if let Ok(sleeping) = msg.body().deserialize::<bool>()
-                            && sleep_tx.send(sleeping).is_err()
-                        {
-                            return;
+                        if let Ok(sleeping) = msg.body().deserialize::<bool>() {
+                            match sleep_tx.try_send(sleeping) {
+                                Ok(()) => {}
+                                Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
+                                    tracing::warn!(
+                                        sleeping,
+                                        "PrepareForSleep queue full; dropping stale event"
+                                    );
+                                }
+                                Err(tokio::sync::mpsc::error::TrySendError::Closed(_)) => return,
+                            }
                         }
                     }
                     Err(error) => {

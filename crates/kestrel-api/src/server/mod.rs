@@ -14,13 +14,14 @@ mod session;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
+use futures_util::StreamExt;
 use kestrel_catalog::{Catalog, CatalogEvent};
 use kestrel_controller::{ControllerEvent, ControllerHandle, SessionId, SessionSnapshot};
 use kestrel_model::{CertId, Certificate, InterfaceName, P2pGroupId, ProfileId, WifiProfile};
-use tokio::sync::Mutex;
 use tokio::sync::broadcast::error::RecvError;
-use tokio::task::JoinHandle;
-use zbus::message::Header;
+use tokio::sync::{Mutex, watch};
+use tokio::task::AbortHandle;
+use zbus::message::{Header, Type};
 
 use crate::{
     Action, ApiError, Authorizer, BUS_NAME, ROOT_PATH, cert_path, p2p_group_path, profile_path,
@@ -111,8 +112,8 @@ impl Shared {
 #[derive(Debug)]
 pub struct Server {
     connection: zbus::Connection,
-    sync: JoinHandle<()>,
-    owner_watch: JoinHandle<()>,
+    tasks: Vec<AbortHandle>,
+    fault_rx: watch::Receiver<Option<String>>,
 }
 
 impl Server {
@@ -143,16 +144,34 @@ impl Server {
         sync.full_resync().await;
         // Start watching bus name owners before claiming our well-known name
         // so no agent disconnect can be missed after registration opens.
-        let owner_watch = agent::watch_owner(shared).await?;
+        let mut tasks = agent::watch_owner(shared).await?;
+        let (fault_tx, fault_rx) = watch::channel(None);
         if let Err(error) = connection.request_name(BUS_NAME).await {
-            owner_watch.abort();
+            for handle in tasks {
+                handle.abort();
+            }
             return Err(error.into());
         }
-        let task = tokio::spawn(sync.run(controller_events, catalog_events));
+        match watch_bus_name(&connection, fault_tx.clone()).await {
+            Ok(handle) => tasks.push(handle),
+            Err(error) => {
+                for handle in tasks {
+                    handle.abort();
+                }
+                let _ = connection.release_name(BUS_NAME).await;
+                return Err(error);
+            }
+        }
+        let sync_fault = fault_tx;
+        let sync_task = tokio::spawn(async move {
+            sync.run(controller_events, catalog_events).await;
+            let _ = sync_fault.send(Some("D-Bus object sync stopped unexpectedly".to_owned()));
+        });
+        tasks.push(sync_task.abort_handle());
         Ok(Self {
             connection,
-            sync: task,
-            owner_watch,
+            tasks,
+            fault_rx,
         })
     }
 
@@ -160,16 +179,81 @@ impl Server {
         &self.connection
     }
 
+    /// Resolves if the server loses its bus name, the D-Bus connection drops,
+    /// or the internal object sync loop stops unexpectedly. Cancel-safe.
+    pub async fn wait_fault(&mut self) -> String {
+        loop {
+            if let Some(reason) = self.fault_rx.borrow().clone() {
+                return reason;
+            }
+            if self.fault_rx.changed().await.is_err() {
+                return "D-Bus server supervisor stopped unexpectedly".to_owned();
+            }
+        }
+    }
+
     /// Releases the bus name and stops syncing.
-    pub async fn stop(self) {
-        self.sync.abort();
-        self.owner_watch.abort();
+    pub async fn stop(mut self) {
+        for handle in self.tasks.drain(..) {
+            handle.abort();
+        }
         let _ = tokio::time::timeout(
             std::time::Duration::from_secs(5),
             self.connection.release_name(BUS_NAME),
         )
         .await;
     }
+}
+
+impl Drop for Server {
+    fn drop(&mut self) {
+        for handle in self.tasks.drain(..) {
+            handle.abort();
+        }
+    }
+}
+
+/// Watches `NameOwnerChanged` for `BUS_NAME` and reports a fatal fault if the
+/// server loses ownership or the D-Bus signal stream closes (bus disconnect).
+async fn watch_bus_name(
+    connection: &zbus::Connection,
+    fault_tx: watch::Sender<Option<String>>,
+) -> Result<AbortHandle, ApiError> {
+    let my_name = connection.unique_name().map(|n| n.as_str().to_owned());
+    let rule = zbus::MatchRule::builder()
+        .msg_type(Type::Signal)
+        .sender("org.freedesktop.DBus")
+        .interface("org.freedesktop.DBus")
+        .member("NameOwnerChanged")
+        .arg(0, BUS_NAME)
+        .build()?;
+    let mut stream = zbus::MessageStream::for_match_rule(rule, connection, None).await?;
+    let task = tokio::spawn(async move {
+        while let Some(item) = stream.next().await {
+            let message = match item {
+                Ok(message) => message,
+                Err(error) => {
+                    tracing::debug!(%error, "ignoring malformed NameOwnerChanged signal");
+                    continue;
+                }
+            };
+            let Ok((name, _old, new)) = message.body().deserialize::<(String, String, String)>()
+            else {
+                continue;
+            };
+            if name == BUS_NAME && my_name.as_deref() != Some(new.as_str()) {
+                let reason = if new.is_empty() {
+                    format!("lost D-Bus name {BUS_NAME}")
+                } else {
+                    format!("lost D-Bus name {BUS_NAME} to {new}")
+                };
+                let _ = fault_tx.send(Some(reason));
+                return;
+            }
+        }
+        let _ = fault_tx.send(Some("D-Bus connection closed".to_owned()));
+    });
+    Ok(task.abort_handle())
 }
 
 struct Sync {

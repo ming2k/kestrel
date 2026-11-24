@@ -1204,3 +1204,20 @@ async fn persistent_p2p_group_lifecycle_and_reconnect() {
     .await;
     env.stop().await;
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn server_wait_fault_reports_bus_name_loss() {
+    let mut env = Env::start(Arc::new(AllowAll)).await;
+    let mut server = env.server.take().unwrap();
+    let conn = server.connection().clone();
+    conn.release_name(kestrel_api::BUS_NAME).await.unwrap();
+    let reason = tokio::time::timeout(Duration::from_secs(3), server.wait_fault())
+        .await
+        .expect("server must report bus name loss promptly");
+    assert!(
+        reason.contains("lost D-Bus name"),
+        "unexpected fault reason: {reason}"
+    );
+    server.stop().await;
+    env.stop().await;
+}

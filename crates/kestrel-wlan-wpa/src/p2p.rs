@@ -133,28 +133,41 @@ impl WpaSupplicant {
         crate::network::insert_psk(&mut args, psk.expose());
         args.insert("mode", Value::from(mode));
         args.insert("disabled", Value::from(2u32));
-        self.lock().suppress_persistent_added += 1;
-        let result = proxy.call_method("AddPersistentGroup", &(args,)).await;
-        match result {
-            Ok(reply) => {
-                let path: OwnedObjectPath = reply.body().deserialize().map_err(dbus_error)?;
-                let mut state = self.lock();
-                state.suppress_persistent_added = state.suppress_persistent_added.saturating_sub(1);
-                state.self_persistent_groups.insert(path.clone());
-                Ok(path)
-            }
-            Err(error) => {
-                let mut state = self.lock();
-                state.suppress_persistent_added = state.suppress_persistent_added.saturating_sub(1);
-                Err(dbus_error(error))
-            }
-        }
+        let guard = SuppressPersistentGuard::new(self);
+        let reply = proxy
+            .call_method("AddPersistentGroup", &(args,))
+            .await
+            .map_err(dbus_error)?;
+        let path: OwnedObjectPath = reply.body().deserialize().map_err(dbus_error)?;
+        self.lock().self_persistent_groups.insert(path.clone());
+        drop(guard);
+        Ok(path)
     }
 
     pub(crate) async fn remove_all_persistent_groups(&self, p2p_path: &OwnedObjectPath) {
         if let Ok(proxy) = self.proxy(p2p_path.as_str(), P2P_DEVICE).await {
             let _ = proxy.call_method("RemoveAllPersistentGroups", &()).await;
         }
+    }
+}
+
+/// RAII guard ensuring `suppress_persistent_added` is always decremented on
+/// early error return or future cancellation.
+struct SuppressPersistentGuard<'a> {
+    wpa: &'a WpaSupplicant,
+}
+
+impl<'a> SuppressPersistentGuard<'a> {
+    fn new(wpa: &'a WpaSupplicant) -> Self {
+        wpa.lock().suppress_persistent_added += 1;
+        Self { wpa }
+    }
+}
+
+impl Drop for SuppressPersistentGuard<'_> {
+    fn drop(&mut self) {
+        let mut state = self.wpa.lock();
+        state.suppress_persistent_added = state.suppress_persistent_added.saturating_sub(1);
     }
 }
 

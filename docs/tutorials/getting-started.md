@@ -124,26 +124,26 @@ List wireless devices detected by Kestrel:
 kestrel status
 ```
 
-Find your wireless interface name in the `IFACE` column (for example `wlp0s20f3` or `wlan0`; you can also check `networkctl list`). Replace `wlp0s20f3` in the commands below with your interface name.
+When a host has a single wireless adapter, `kestrel` selects it automatically. On multi-radio hosts, pass `-d <iface>` (for example `-d wlp0s20f3`) or set `KESTREL_DEVICE`.
 
 Scan for nearby networks:
 
 ```sh
-kestrel wifi scan wlp0s20f3
+kestrel wifi scan
 ```
 
-Join a network by SSID. Kestrel scans to infer the security mode, prompts for the passphrase without echoing it, seals the secret with `systemd-creds`, saves a profile, associates over L2, hands L3 configuration to `systemd-networkd`, and waits until an IP address is configured:
+Connect to a network by SSID. Kestrel scans to infer the security mode, prompts for the passphrase without echoing it, seals the secret with `systemd-creds`, saves a profile, associates over L2, hands L3 configuration to `systemd-networkd`, and waits until an IP address is configured:
 
 ```sh
-kestrel wifi join wlp0s20f3 "MyNetwork"
+kestrel wifi connect "MyNetwork"
 ```
 
-> Polkit authorizes active local seat sessions to join, modify, and forget wireless networks without a root password prompt. Remote SSH and inactive sessions require administrator authentication (`auth_admin_keep`); `kestrel` checks authorization before prompting for a Wi-Fi passphrase and automatically spawns `pkttyagent --fallback` on terminals when needed.
+> Polkit authorizes active local seat sessions to connect, modify, and delete wireless profiles without a root password prompt. Remote SSH and inactive sessions require administrator authentication (`auth_admin_keep`); `kestrel` checks authorization before prompting for a Wi-Fi passphrase and automatically spawns `pkttyagent --fallback` on terminals when needed.
 
 Confirm your link status, IP address, DNS, and recent connection history:
 
 ```sh
-kestrel wifi status wlp0s20f3
+kestrel status wlp0s20f3
 kestrel wifi history
 resolvectl status wlp0s20f3
 ```

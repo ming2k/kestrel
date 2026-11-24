@@ -12,26 +12,26 @@ Kestrel turns an AP-capable wireless adapter into a SoftAP hotspot while keeping
 kestrel --json status | jq '.devices[] | {interface, capabilities}'
 ```
 
-Any device listing `access-point` in `capabilities` exports `com.hihusky.Kestrel.Hotspot` and can run a hotspot.
+Any device listing `access-point` in `capabilities` exports `com.hihusky.Kestrel.Hotspot` and can run a hotspot. When only one AP-capable device exists, `kestrel` selects it automatically; otherwise pass `-d <iface>`.
 
 ---
 
 ## 2. Start a Hotspot
 
+`hotspot start` waits until the hotspot reaches `active` by default (pass `--no-wait` to return immediately):
+
 ```sh
 # WPA2-PSK (default) with an interactive, no-echo passphrase prompt (8..=63 chars)
-kestrel hotspot start wlp0s20f3 --ssid "kestrel-ap"
+kestrel hotspot start "kestrel-ap"
 
 # Open hotspot on channel 6 (2437 MHz)
-kestrel hotspot start wlp0s20f3 --ssid "kestrel-ap" --security open --frequency 2437
+kestrel hotspot start "kestrel-ap" --security open -f 2437
 
-# WPA3-SAE hotspot with hidden SSID
-kestrel hotspot start wlp0s20f3 --ssid "kestrel-ap" --security wpa3-personal --hidden
+# WPA3-SAE hotspot with hidden SSID on a specific device
+kestrel hotspot start "kestrel-ap" -d wlp0s20f3 --security wpa3-personal --hidden
 
 # Non-interactive script: passphrase read from the first line of stdin
-printf '%s\n' "$AP_PASSPHRASE" | kestrel hotspot start wlp0s20f3 \
-  --ssid "kestrel-ap" \
-  --secret-stdin
+printf '%s\n' "$AP_PASSPHRASE" | kestrel hotspot start "kestrel-ap" --secret-stdin
 ```
 
 Security mode support by backend:
@@ -65,14 +65,15 @@ Kestrel writes `IPMasquerade=ipv4` into the hotspot's runtime `.network` unit (`
 ## 4. Inspect Status, Leases, and Clients
 
 ```sh
-kestrel hotspot status wlp0s20f3
-kestrel --json hotspot status          # every AP-capable device
+kestrel hotspot status                 # table of every AP-capable device
+kestrel hotspot status -d wlp0s20f3    # detailed view including DHCP leases
+kestrel --json hotspot status
 ```
 
 The hotspot progresses through `starting` → `configuring-l3` → `active`:
 
 - `gateway`: CIDR of the served `/24` subnet (`.1` assigned to the AP interface).
-- `leases`: DHCPv4 leases (`ipv4`, `mac`) handed out by `systemd-networkd`.
+- `leases`: DHCPv4 leases (`address`, `client`) handed out by `systemd-networkd`.
 - `connected_clients`: currently associated station MAC addresses.
 
 ---
@@ -80,10 +81,10 @@ The hotspot progresses through `starting` → `configuring-l3` → `active`:
 ## 5. Stop the Hotspot and Restore Station Mode
 
 ```sh
-kestrel hotspot stop wlp0s20f3
+kestrel hotspot stop
 ```
 
-Stopping tears down L3, stops the AP, and restores station orchestration so autoconnect resumes automatically (unless station autoconnect was already held before the hotspot started).
+`hotspot stop` waits until the hotspot reaches `stopped` by default. Stopping tears down L3, stops the AP, and restores station orchestration so autoconnect resumes automatically (unless station autoconnect was already held before the hotspot started).
 
 If `kestrel-daemon` is killed abruptly (`kill -9`), the next startup sweep removes tagged `wpa_supplicant` AP blocks, resets `iwd` AP-mode devices back to `station`, and deletes the runtime `.network` unit.
 

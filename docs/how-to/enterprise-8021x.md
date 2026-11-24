@@ -5,7 +5,7 @@ Kestrel supports WPA2-Enterprise (`wpa-enterprise`) and WPA3-Enterprise (`wpa3-e
 > **Backend requirement:** 802.1X enterprise security requires the **`wpa_supplicant`** backend. `iwd` cannot enforce enterprise profiles and rejects them with `NotSupported`. Verify support on your device first:
 >
 > ```sh
-> kestrel status --json | jq '.devices[] | {interface, supported_security}'
+> kestrel --json status | jq '.devices[] | {interface, supported_security}'
 > ```
 
 ---
@@ -14,7 +14,7 @@ Kestrel supports WPA2-Enterprise (`wpa-enterprise`) and WPA3-Enterprise (`wpa3-e
 
 Kestrel separates public trust anchors from private secrets:
 
-- **Public certificates** (CA bundles and EAP-TLS client certificates) are imported with `kestrel certificate add` and stored as `0600` TOML records under `/var/lib/kestrel/certs/<uuid>.toml`. Public PEM text is never readable back over D-Bus; only metadata and SHA-256 fingerprints are exposed.
+- **Public certificates** (CA bundles and EAP-TLS client certificates) are imported with `kestrel certificate add` (alias: `kestrel cert add`) and stored as `0600` TOML records under `/var/lib/kestrel/certs/<uuid>.toml`. Public PEM text is never readable back over D-Bus; only metadata and SHA-256 fingerprints are exposed.
 - **Private keys and passwords** are never stored in the certificate store. `kestrel` reads `--private-key-file` locally (maximum 256 KiB), sends it over D-Bus as a write-only secret bundle, and `kestrel-daemon` seals it with `systemd-creds` under `/var/lib/kestrel/secrets/<uuid>.cred`.
 - At association time, Kestrel injects certificates and private keys into `wpa_supplicant` as in-memory `blob://kestrel-*` blobs and deletes those blobs on disconnect and during crash-recovery sweeps.
 
@@ -22,7 +22,7 @@ Kestrel separates public trust anchors from private secrets:
 
 ## 2. Import Public Certificates
 
-Import a PEM CA certificate or CA bundle (maximum 1 MiB; pass `-` to read from stdin):
+Import a PEM CA certificate or CA bundle (maximum 1 MiB; pass `-` to read from stdin). When reading from a file, `--name` is optional and defaults to the filename stem:
 
 ```sh
 kestrel certificate add ./corp-ca.pem --name "Corp CA"
@@ -47,13 +47,12 @@ Certificate references in `--ca-cert` and `--client-cert` accept the full UUID, 
 
 ## 3. Create Enterprise Profiles
 
-Enterprise profiles are created with `kestrel profile add` (not `kestrel wifi join`, which is for personal/open networks).
+Enterprise profiles are created with `kestrel profile add` (not `kestrel wifi connect`, which creates personal/open profiles only).
 
 ### PEAP + MSCHAPv2 (Username & Password with Pinned CA)
 
 ```sh
-kestrel profile add \
-  --ssid "CorpWiFi" \
+kestrel profile add "CorpWiFi" \
   --security wpa-enterprise \
   --eap peap \
   --identity "alice@corp.example" \
@@ -69,8 +68,7 @@ kestrel profile add \
 If your RADIUS server uses a publicly trusted certificate instead of a private CA, pass `--system-ca` instead of `--ca-cert`:
 
 ```sh
-kestrel profile add \
-  --ssid "Eduroam" \
+kestrel profile add "Eduroam" \
   --security wpa-enterprise \
   --eap ttls \
   --identity "alice@uni.example" \
@@ -81,13 +79,12 @@ kestrel profile add \
   --ask-secret
 ```
 
-> **Mutual exclusion:** Setting both `--ca-cert` and `--system-ca true` on the same profile is rejected with `InvalidArgument` so server verification policy is never ambiguous.
+> **Mutual exclusion:** Setting both `--ca-cert` and `--system-ca` on the same profile is rejected so server verification policy is never ambiguous. When switching an existing profile via `profile edit`, combine `--clear-ca-cert --system-ca true` (or `--system-ca false --ca-cert "Corp CA"`).
 
 ### EAP-TLS (Client Certificate + Sealed Private Key)
 
 ```sh
-kestrel profile add \
-  --ssid "CorpTLS" \
+kestrel profile add "CorpTLS" \
   --security wpa3-enterprise \
   --eap tls \
   --identity "alice@corp.example" \
@@ -100,8 +97,7 @@ kestrel profile add \
 If `./alice.key` is encrypted with a passphrase, supply that key passphrase on stdin (non-interactively) or omit `--private-key-password-stdin` to be prompted when running in a terminal:
 
 ```sh
-printf '%s\n' "$KEY_PASSPHRASE" | kestrel profile add \
-  --ssid "CorpTLS" \
+printf '%s\n' "$KEY_PASSPHRASE" | kestrel profile add "CorpTLS" \
   --security wpa3-enterprise \
   --eap tls \
   --identity "alice@corp.example" \
@@ -114,8 +110,7 @@ printf '%s\n' "$KEY_PASSPHRASE" | kestrel profile add \
 ### EAP-PWD
 
 ```sh
-kestrel profile add \
-  --ssid "CampusPWD" \
+kestrel profile add "CampusPWD" \
   --security wpa3-enterprise \
   --eap pwd \
   --identity "alice@campus.example" \
@@ -140,8 +135,8 @@ Connect using the saved profile and verify the configuration:
 
 ```sh
 kestrel profile show "CorpWiFi"
-kestrel wifi connect wlp0s20f3 "CorpWiFi"
-kestrel wifi status wlp0s20f3
+kestrel wifi connect "CorpWiFi"
+kestrel status wlp0s20f3
 ```
 
 ---
@@ -158,7 +153,7 @@ kestrel certificate add ./corp-ca-new.pem --name "Corp CA 2027"
 kestrel profile edit "CorpWiFi" --ca-cert "Corp CA 2027"
 
 # 3. Delete the old certificate
-kestrel certificate delete "Corp CA" --yes
+kestrel certificate delete "Corp CA" -y
 ```
 
 Changing `--eap` or `--security` on an existing profile clears its stored secret bundle automatically; pass `--ask-secret`, `--secret-stdin`, or `--private-key-file` to install new credentials.

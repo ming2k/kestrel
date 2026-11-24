@@ -42,6 +42,7 @@ make install PREFIX=/usr DESTDIR=/tmp/kestrel-stage
 | `data/com.hihusky.Kestrel.service` | `/usr/share/dbus-1/system-services/com.hihusky.Kestrel.service` | D-Bus activation descriptor |
 | `data/com.hihusky.kestrel.policy` | `/usr/share/polkit-1/actions/com.hihusky.kestrel.policy` | Polkit authorization defaults |
 | `config.example.toml` | `/etc/kestrel/kestrel.toml.example` | Administrator configuration template |
+| `kestrel completions {bash,zsh,fish}` | `/usr/share/bash-completion/completions/kestrel`, `/usr/share/zsh/site-functions/_kestrel`, `/usr/share/fish/vendor_completions.d/kestrel.fish` | Shell completion scripts |
 | `LICENSE`, `README.md`, `ARCHITECTURE.md`, `docs/` | `/usr/share/doc/kestrel/` | Installed documentation |
 
 ---

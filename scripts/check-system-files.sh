@@ -116,7 +116,7 @@ EOF
 # Every option of data/kestrel.service that an unprivileged user manager
 # can enforce. (Capability, device, mount, and IP-firewall options need a
 # system manager; systemd-analyze above covers their syntax.)
-for key in Type NotifyAccess UMask NoNewPrivileges RestrictAddressFamilies \
+for key in Type NotifyAccess WatchdogSec UMask NoNewPrivileges RestrictAddressFamilies \
     RestrictNamespaces RestrictRealtime RestrictSUIDSGID LockPersonality \
     MemoryDenyWriteExecute SystemCallArchitectures SystemCallFilter \
     SystemCallErrorNumber ProtectProc RemoveIPC; do
@@ -129,7 +129,7 @@ done
 systemd-run --user --unit=kestrel-sandbox-check --collect -q "$@" \
     "$BIN/kestrel-daemon" --bus "$ADDRESS" --config "$WORK/kestrel.toml"
 CTL="$BIN/kestrel --bus $ADDRESS"
-printf 'correct horse battery\n' | $CTL profile add --ssid home --security wpa-personal \
+printf 'correct horse battery\n' | $CTL profile add home --security wpa-personal \
     --l3 unmanaged --secret-stdin >/dev/null
 i=0
 until $CTL --json status | grep -q '"state": "connected"'; do

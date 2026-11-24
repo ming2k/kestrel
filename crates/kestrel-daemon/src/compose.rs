@@ -4,10 +4,11 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use kestrel_api::{AllowAll, Authorizer, Polkit, Server};
 use kestrel_catalog::{Catalog, CatalogStores};
-use kestrel_controller::{Controller, ControllerPorts};
+use kestrel_controller::{Controller, ControllerPorts, RadioControl};
 use kestrel_l3_networkd::{Networkd, NetworkdConfig};
 use kestrel_ports::l3::L3Provider;
 use kestrel_ports::store::{
@@ -22,9 +23,10 @@ use kestrel_wlan_iwd::Iwd;
 use kestrel_wlan_wpa::WpaSupplicant;
 use thiserror::Error;
 use tokio::signal::unix::{SignalKind, signal};
+use tokio::task::JoinHandle;
 
 use crate::no_l3::NoL3;
-use crate::notify::notify;
+use crate::notify::{notify, watchdog_interval};
 use crate::power;
 use crate::settings::{
     Authorization, L3Backend, SecretBackend, Settings, SettingsError, WirelessBackend,
@@ -40,6 +42,8 @@ pub(crate) enum DaemonError {
     Backend(String),
     #[error("cannot start: {0}")]
     Start(String),
+    #[error("fatal runtime fault: {0}")]
+    Fatal(String),
 }
 
 async fn connect(bus: &str) -> Result<zbus::Connection, DaemonError> {
@@ -170,7 +174,7 @@ pub(crate) async fn run(config: &Path, bus: &str) -> Result<(), DaemonError> {
             Arc::new(AllowAll)
         }
     };
-    let server =
+    let mut server =
         match Server::serve(connection.clone(), controller.handle(), catalog, authorizer).await {
             Ok(server) => server,
             Err(error) => {
@@ -179,22 +183,79 @@ pub(crate) async fn run(config: &Path, bus: &str) -> Result<(), DaemonError> {
                 return Err(DaemonError::Start(format!("cannot serve the API: {error}")));
             }
         };
-    notify("READY=1");
+    let watchdog_task = spawn_watchdog(connection.clone(), controller.handle().radio());
+    notify("READY=1\nSTATUS=running");
     tracing::info!("ready");
 
     let mut terminate =
         signal(SignalKind::terminate()).map_err(|e| DaemonError::Start(e.to_string()))?;
     let mut interrupt =
         signal(SignalKind::interrupt()).map_err(|e| DaemonError::Start(e.to_string()))?;
-    tokio::select! {
-        _ = terminate.recv() => {}
-        _ = interrupt.recv() => {}
+    let fatal_fault = tokio::select! {
+        _ = terminate.recv() => None,
+        _ = interrupt.recv() => None,
+        reason = server.wait_fault() => Some(reason),
+    };
+    notify("STOPPING=1\nSTATUS=stopping");
+    if let Some(reason) = &fatal_fault {
+        tracing::error!(%reason, "fatal runtime fault; shutting down for supervisor recovery");
+    } else {
+        tracing::info!("stopping");
     }
-    notify("STOPPING=1");
-    tracing::info!("stopping");
+    if let Some(task) = watchdog_task {
+        task.abort();
+    }
     power_task.abort();
     server.stop().await;
     controller.shutdown().await;
     tracing::info!("stopped cleanly");
-    Ok(())
+    if let Some(reason) = fatal_fault {
+        Err(DaemonError::Fatal(reason))
+    } else {
+        Ok(())
+    }
+}
+
+/// Starts an active-liveness systemd watchdog task when `WATCHDOG_USEC` is set.
+///
+/// Each tick proves both `RadioCoordinator` responsiveness and D-Bus round-trip
+/// health before sending `WATCHDOG=1`. If either stalls, petting stops so
+/// systemd restarts `kestrel.service` and startup sweep reconciles state.
+fn spawn_watchdog(connection: zbus::Connection, radio: RadioControl) -> Option<JoinHandle<()>> {
+    let watchdog = watchdog_interval()?;
+    let period = (watchdog / 2).max(Duration::from_millis(250));
+    let probe_timeout = (watchdog / 4).clamp(Duration::from_secs(1), Duration::from_secs(5));
+    tracing::info!(
+        watchdog_secs = watchdog.as_secs_f64(),
+        period_secs = period.as_secs_f64(),
+        "systemd watchdog enabled"
+    );
+    Some(tokio::spawn(async move {
+        let mut ticker = tokio::time::interval(period);
+        ticker.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
+        loop {
+            ticker.tick().await;
+            let radio_ok = matches!(
+                tokio::time::timeout(probe_timeout, radio.wireless_enabled()).await,
+                Ok(Ok(_))
+            );
+            let bus_ok = matches!(
+                tokio::time::timeout(probe_timeout, async {
+                    let proxy = zbus::fdo::DBusProxy::new(&connection).await?;
+                    proxy.get_id().await
+                })
+                .await,
+                Ok(Ok(_))
+            );
+            if radio_ok && bus_ok {
+                notify("WATCHDOG=1");
+            } else {
+                tracing::error!(
+                    radio_ok,
+                    bus_ok,
+                    "liveness probe failed; withholding systemd WATCHDOG=1"
+                );
+            }
+        }
+    }))
 }
